@@ -218,6 +218,7 @@ class MovingWindow:
         try:
             async for sample in self._resampled_data_recv:
                 _logger.debug("Received new sample: %s", sample)
+                print("Received new sample: %s, timebounds: %s, %s", sample, self._buffer.time_bound_oldest, self._buffer.time_bound_newest)
                 if self._resampler and self._resampler_sender:
                     await self._resampler_sender.send(sample)
                 else:
@@ -268,6 +269,7 @@ class MovingWindow:
     ) -> ArrayLike:
         """
         Access a sub window of the `MovingWindow`.
+        TODO Add flag that tells what happens if interval is partly filled, exception or biggest possible interval
 
         Args:
             start: The start index or datetime of the sub window.
@@ -283,6 +285,10 @@ class MovingWindow:
         Returns:
             A sub window of the `MovingWindow`.
         """
+        print(f"Buffer: {self._buffer._buffer}")
+        print(self._buffer.time_bound_oldest)
+        print(self._buffer.time_bound_newest)
+        print(self._buffer._gaps)
         if len(self._buffer) == 0:
             raise IndexError("The buffer is empty.")
         if isinstance(start, datetime) and isinstance(end, datetime):

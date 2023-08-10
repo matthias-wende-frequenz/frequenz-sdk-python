@@ -94,7 +94,7 @@ async def test_access_window_by_int_slice() -> None:
     since the push_lm_data function is starting with the same initial timestamp.
     """
     window, sender = init_moving_window(timedelta(seconds=14))
-    await push_logical_meter_data(sender, range(0, 14))
+    await push_logical_meter_data(sender, range(0, 5))
     assert np.array_equal(window.window(3, 5), np.array([3.0, 4.0]))
 
     data = [1, 2, 2.5, 1, 1, 1, 2, 2, 1, 1, 1, 1, 1, 1]
@@ -104,7 +104,7 @@ async def test_access_window_by_int_slice() -> None:
 
 async def test_access_window_by_ts_slice() -> None:
     """Test accessing a subwindow with a timestamp slice"""
-    window, sender = init_moving_window(timedelta(seconds=5))
+    window, sender = init_moving_window(timedelta(seconds=14))
     await push_logical_meter_data(sender, range(0, 5))
     time_start = UNIX_EPOCH + timedelta(seconds=3)
     time_end = time_start + timedelta(seconds=2)
