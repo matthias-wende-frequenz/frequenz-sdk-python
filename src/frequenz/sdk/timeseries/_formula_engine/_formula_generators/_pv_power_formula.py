@@ -6,10 +6,10 @@
 from __future__ import annotations
 
 import logging
-from collections import abc
+from typing import Set
 
 from ....microgrid import connection_manager
-from ....microgrid.component import ComponentCategory, ComponentMetricId
+from ....microgrid.component import Component, ComponentCategory, ComponentMetricId
 from ..._quantities import Power
 from .._formula_engine import FormulaEngine
 from ._formula_generator import NON_EXISTING_COMPONENT_ID, FormulaGenerator, FormulaType
@@ -50,11 +50,15 @@ class PVPowerFormula(FormulaGenerator[Power]):
 
         builder.push_oper("(")
         builder.push_oper("(")
-        for idx, comp_id in enumerate(pv_components):
+        for idx, component in enumerate(pv_components):
             if idx > 0:
                 builder.push_oper("+")
 
-            builder.push_component_metric(comp_id, nones_are_zeros=True)
+            # should only be the case if the component is not a meter
+            builder.push_component_metric(
+                component.component_id,
+                nones_are_zeros=component.category != ComponentCategory.METER,
+            )
         builder.push_oper(")")
         if self._config.formula_type == FormulaType.PRODUCTION:
             builder.push_oper("*")
@@ -66,30 +70,15 @@ class PVPowerFormula(FormulaGenerator[Power]):
 
         return builder.build()
 
-    def _get_pv_power_components(self) -> abc.Set[int]:
+    def _get_pv_power_components(self) -> Set[Component]:
         """Get the component ids of the PV inverters or meters in the component graph.
 
         Returns:
             A set of component ids of the PV inverters or meters in the component graph.
-
-        Raises:
-            RuntimeError: if the grid component has no PV inverters or meters as successors.
         """
         component_graph = connection_manager.get().component_graph
-        grid_successors = self._get_grid_component_successors()
-
-        if len(grid_successors) == 1:
-            successor = next(iter(grid_successors))
-            if successor.category != ComponentCategory.METER:
-                raise RuntimeError(
-                    "Only grid successor in the component graph is not a meter."
-                )
-            grid_successors = component_graph.successors(successor.component_id)
-
-        pv_meters_or_inverters: set[int] = set()
-
-        for successor in grid_successors:
-            if component_graph.is_pv_chain(successor):
-                pv_meters_or_inverters.add(successor.component_id)
-
-        return pv_meters_or_inverters
+        return component_graph.dfs_components_with_condition(
+            self._get_grid_component(),
+            set(),
+            component_graph.is_pv_chain,
+        )
