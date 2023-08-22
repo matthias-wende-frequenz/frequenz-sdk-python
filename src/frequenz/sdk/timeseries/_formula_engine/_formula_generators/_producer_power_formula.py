@@ -34,32 +34,26 @@ class ProducerPowerFormula(FormulaGenerator[Power]):
         builder = self._get_builder(
             "producer_power", ComponentMetricId.ACTIVE_POWER, Power.from_watts
         )
-        component_graph = connection_manager.get().component_graph
-        grid_successors = self._get_grid_component_successors()
 
-        if len(grid_successors) == 1:
-            grid_meter = next(iter(grid_successors))
-            if grid_meter.category != ComponentCategory.METER:
-                raise RuntimeError(
-                    "Only grid successor in the component graph is not a meter."
-                )
-            grid_successors = component_graph.successors(grid_meter.component_id)
+        component_graph = connection_manager.get().component_graph
+        # if in the future we support additional producers, we need to add them to the lambda
+        producer_components = component_graph.dfs_components_with_condition(
+            self._get_grid_component(),
+            set(),
+            lambda component: component_graph.is_pv_chain(component)
+            or component_graph.is_chp_chain(component),
+        )
 
         first_iteration = True
-        for successor in iter(grid_successors):
-            # if in the future we support additional producers, we need to add them here
-            if component_graph.is_chp_chain(successor) or component_graph.is_pv_chain(
-                successor
-            ):
-                if not first_iteration:
-                    builder.push_oper("+")
+        for component in producer_components:
+            if not first_iteration:
+                builder.push_oper("+")
+            first_iteration = False
 
-                first_iteration = False
-
-                builder.push_component_metric(
-                    successor.component_id,
-                    nones_are_zeros=successor.category != ComponentCategory.METER,
-                )
+            builder.push_component_metric(
+                component.component_id,
+                nones_are_zeros=component.category != ComponentCategory.METER,
+            )
 
         if first_iteration:
             builder.push_component_metric(
