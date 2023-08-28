@@ -5,7 +5,7 @@
 requires = [
   "setuptools == 67.7.2",
   "setuptools_scm[toml] == 7.1.0",
-  "frequenz-repo-config[lib] == 0.3.0",
+  "frequenz-repo-config[lib] == 0.4.0",
 ]
 build-backend = "setuptools.build_meta"
 
@@ -14,7 +14,7 @@ name = "frequenz-sdk"
 description = "A development kit to interact with the Frequenz development platform"
 readme = "README.md"
 license = { text = "MIT" }
-keywords = ["frequenz", "sdk", "microgrid", "actor"]
+keywords = ["frequenz", "python", "lib", "library", "sdk", "microgrid"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Intended Audience :: Developers",
@@ -26,7 +26,7 @@ classifiers = [
 ]
 requires-python = ">= 3.11, < 4"
 dependencies = [
-  "frequenz-api-microgrid >= 0.11.0, < 0.12.0",
+  "frequenz-api-microgrid >= 0.15.1, < 0.16.0",
   # Make sure to update the mkdocs.yml file when
   # changing the version
   # (plugins.mkdocstrings.handlers.python.import)
@@ -54,27 +54,27 @@ dev-docstrings = [
   "darglint == 1.8.1",
   "tomli == 2.0.1",      # Needed by pydocstyle to read pyproject.toml
 ]
-dev-examples = ["polars == 0.18.7"]
+dev-examples = ["polars == 0.18.13"]
 dev-formatting = ["black == 23.7.0", "isort == 5.12.0"]
 dev-mkdocs = [
   "mike == 1.1.2",
   "mkdocs-gen-files == 0.5.0",
   "mkdocs-literate-nav == 0.6.0",
-  "mkdocs-material == 9.1.18",
+  "mkdocs-material == 9.2.5",
   "mkdocs-section-index == 0.3.5",
   "mkdocstrings[python] == 0.22.0",
-  "frequenz-repo-config[lib] == 0.3.0",
+  "frequenz-repo-config[lib] == 0.4.0",
 ]
 dev-mypy = [
-  "mypy == 1.4.1",
+  "mypy == 1.5.1",
   "grpc-stubs == 1.24.12",      # This dependency introduces breaking changes in patch releases
-  "types-protobuf == 4.23.0.1",
+  "types-protobuf == 4.24.0.1",
   # For checking the noxfile, docs/ script, and tests
   "frequenz-sdk[dev-mkdocs,dev-noxfile,dev-pytest]",
 ]
-dev-noxfile = ["nox == 2023.4.22", "frequenz-repo-config[lib] == 0.3.0"]
+dev-noxfile = ["nox == 2023.4.22", "frequenz-repo-config[lib] == 0.4.0"]
 dev-pylint = [
-  "pylint == 2.17.4",
+  "pylint == 2.17.5",
   # For checking the noxfile, docs/ script, and tests
   "frequenz-sdk[dev-mkdocs,dev-noxfile,dev-pytest]",
 ]
@@ -82,11 +82,11 @@ dev-pytest = [
   "pytest == 7.4.0",
   "pytest-mock == 3.11.1",
   "pytest-asyncio == 0.21.1",
-  "time-machine == 2.11.0",
+  "time-machine == 2.12.0",
   "async-solipsism == 0.5",
   # For checking docstring code examples
   "sybil == 5.0.3",
-  "pylint == 2.17.4",
+  "pylint == 2.17.5",
   "frequenz-sdk[dev-examples]",
 ]
 dev = [
@@ -107,7 +107,7 @@ include = '\.pyi?$'
 [tool.isort]
 profile = "black"
 line_length = 88
-src_paths = ["src", "examples", "tests"]
+src_paths = ["benchmarks", "examples", "src", "tests"]
 
 [tool.pylint.similarities]
 ignore-comments = ['yes']

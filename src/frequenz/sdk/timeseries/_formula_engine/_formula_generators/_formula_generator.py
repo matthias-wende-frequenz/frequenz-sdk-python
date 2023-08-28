@@ -15,6 +15,7 @@ from typing import Callable, Generic
 from frequenz.channels import Sender
 
 from ....actor import ChannelRegistry, ComponentMetricRequest
+from ....microgrid import component, connection_manager
 from ....microgrid.component import ComponentMetricId
 from ..._quantities import QuantityT
 from .._formula_engine import FormulaEngine, FormulaEngine3Phase
@@ -99,6 +100,48 @@ class FormulaGenerator(ABC, Generic[QuantityT]):
             create_method,
         )
         return builder
+
+    def _get_grid_component(self) -> component.Component:
+        """
+        Get the grid component in the component graph.
+
+        Returns:
+            The first grid component found in the graph.
+
+        Raises:
+            ComponentNotFound: If the grid component is not found in the component graph.
+        """
+        component_graph = connection_manager.get().component_graph
+        grid_component = next(
+            iter(
+                component_graph.components(
+                    component_category={component.ComponentCategory.GRID}
+                )
+            ),
+            None,
+        )
+        if grid_component is None:
+            raise ComponentNotFound("Grid component not found in the component graph.")
+
+        return grid_component
+
+    def _get_grid_component_successors(self) -> set[component.Component]:
+        """Get the set of grid component successors in the component graph.
+
+        Returns:
+            A set of grid component successors.
+
+        Raises:
+            ComponentNotFound: If no successor components are found in the component graph.
+        """
+        grid_component = self._get_grid_component()
+        component_graph = connection_manager.get().component_graph
+        grid_successors = component_graph.successors(grid_component.component_id)
+
+        if not grid_successors:
+            raise ComponentNotFound("No components found in the component graph.")
+
+        return grid_successors
 
     @abstractmethod
     def generate(

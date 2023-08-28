@@ -70,7 +70,7 @@ async def benchmark_data_sourcing(
         num_ev_chargers * len(COMPONENT_METRIC_IDS) * num_msgs_per_battery
     )
     mock_grid = MockMicrogrid(
-        grid_side_meter=False, num_values=num_msgs_per_battery, sample_rate_s=0.0
+        grid_meter=False, num_values=num_msgs_per_battery, sample_rate_s=0.0
     )
 
     mock_grid.add_ev_chargers(num_ev_chargers)
@@ -113,23 +113,22 @@ async def benchmark_data_sourcing(
             await request_sender.send(request)
             consume_tasks.append(asyncio.create_task(consume(recv_channel)))
 
-    DataSourcingActor(request_receiver, channel_registry)
+    async with DataSourcingActor(request_receiver, channel_registry):
+        await asyncio.gather(*consume_tasks)
 
-    await asyncio.gather(*consume_tasks)
+        time_taken = perf_counter() - start_time
 
-    time_taken = perf_counter() - start_time
+        await mock_grid.cleanup()
 
-    await mock_grid.cleanup()
-
-    print(f"Samples Sent: {samples_sent}, time taken: {time_taken}")
-    print(f"Samples per second: {samples_sent / time_taken}")
-    print(
-        "Expected samples: "
-        f"{num_expected_messages}, missing: {num_expected_messages - samples_sent}"
-    )
-    print(
-        f"Missing per EVC: {(num_expected_messages - samples_sent) / num_ev_chargers}"
-    )
+        print(f"Samples Sent: {samples_sent}, time taken: {time_taken}")
+        print(f"Samples per second: {samples_sent / time_taken}")
+        print(
+            "Expected samples: "
+            f"{num_expected_messages}, missing: {num_expected_messages - samples_sent}"
+        )
+        print(
+            f"Missing per EVC: {(num_expected_messages - samples_sent) / num_ev_chargers}"
+        )
 
 
 def parse_args() -> Tuple[int, int, bool]:

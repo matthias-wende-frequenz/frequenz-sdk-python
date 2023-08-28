@@ -17,7 +17,7 @@ from frequenz.sdk.actor import ChannelRegistry, ResamplerConfig
 from frequenz.sdk.actor.power_distributing import (
     BatteryStatus,
     Error,
-    OutOfBound,
+    OutOfBounds,
     PartialFailure,
     PowerDistributingActor,
     Request,
@@ -75,7 +75,7 @@ def parse_result(result: List[List[Result]]) -> Dict[str, float]:
         Error: 0,
         Success: 0,
         PartialFailure: 0,
-        OutOfBound: 0,
+        OutOfBounds: 0,
     }
 
     for result_list in result:
@@ -86,7 +86,7 @@ def parse_result(result: List[List[Result]]) -> Dict[str, float]:
         "success_num": result_counts[Success],
         "failed_num": result_counts[PartialFailure],
         "error_num": result_counts[Error],
-        "out_of_bound": result_counts[OutOfBound],
+        "out_of_bounds": result_counts[OutOfBounds],
     }
 
 
@@ -108,19 +108,16 @@ async def run_test(  # pylint: disable=too-many-locals
     power_request_channel = Broadcast[Request]("power-request")
     battery_status_channel = Broadcast[BatteryStatus]("battery-status")
     channel_registry = ChannelRegistry(name="power_distributor")
-    distributor = PowerDistributingActor(
+    async with PowerDistributingActor(
         channel_registry=channel_registry,
         requests_receiver=power_request_channel.new_receiver(),
         battery_status_sender=battery_status_channel.new_sender(),
-    )
+    ):
+        tasks: List[Coroutine[Any, Any, List[Result]]] = []
+        tasks.append(send_requests(batteries, num_requests))
 
-    tasks: List[Coroutine[Any, Any, List[Result]]] = []
-    tasks.append(send_requests(batteries, num_requests))
-
-    result = await asyncio.gather(*tasks)
-    exec_time = timeit.default_timer() - start
-
-    await distributor._stop()  # type: ignore # pylint: disable=no-member, protected-access
+        result = await asyncio.gather(*tasks)
+        exec_time = timeit.default_timer() - start
 
     summary = parse_result(result)
     summary["num_requests"] = num_requests

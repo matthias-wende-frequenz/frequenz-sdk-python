@@ -26,8 +26,9 @@ from typing import Any, Dict, Iterable, List, Optional, Self, Set, Tuple
 import grpc
 from frequenz.channels import Peekable, Receiver, Sender
 
+from ..._internal._math import is_close_to_zero
 from ...actor import ChannelRegistry
-from ...actor._decorator import actor
+from ...actor._actor import Actor
 from ...microgrid import ComponentGraph, connection_manager
 from ...microgrid.client import MicrogridApiClient
 from ...microgrid.component import (
@@ -36,10 +37,14 @@ from ...microgrid.component import (
     ComponentCategory,
     InverterData,
 )
-from ...power import DistributionAlgorithm, DistributionResult, InvBatPair
 from ._battery_pool_status import BatteryPoolStatus, BatteryStatus
+from ._distribution_algorithm import (
+    DistributionAlgorithm,
+    DistributionResult,
+    InvBatPair,
+)
 from .request import Request
-from .result import Error, OutOfBound, PartialFailure, Result, Success
+from .result import Error, OutOfBounds, PartialFailure, PowerBounds, Result, Success
 
 _logger = logging.getLogger(__name__)
 
@@ -78,8 +83,7 @@ class _CacheEntry:
         return time.monotonic_ns() >= self.expiry_time
 
 
-@actor
-class PowerDistributingActor:
+class PowerDistributingActor(Actor):
     # pylint: disable=too-many-instance-attributes
     """Actor to distribute the power between batteries in a microgrid.
 
@@ -103,76 +107,6 @@ class PowerDistributingActor:
     overlap (they have at least one common battery), then then both batteries
     will be processed. However it is not expected so the proper error log will be
     printed.
-
-    Example:
-        ```python
-        from frequenz.sdk import microgrid
-        from frequenz.sdk.microgrid.component import ComponentCategory
-        from frequenz.sdk.actor import ResamplerConfig
-        from frequenz.sdk.actor.power_distributing import (
-            PowerDistributingActor,
-            Request,
-            Result,
-            Success,
-            Error,
-            PartialFailure,
-            Ignored,
-        )
-        from frequenz.channels import Broadcast, Receiver, Sender
-        from datetime import timedelta
-        from frequenz.sdk import actor
-
-        HOST = "localhost"
-        PORT = 50051
-
-        await microgrid.initialize(
-            HOST,
-            PORT,
-            ResamplerConfig(resampling_period=timedelta(seconds=1))
-        )
-
-        graph = microgrid.connection_manager.get().component_graph
-
-        batteries = graph.components(component_category={ComponentCategory.BATTERY})
-        batteries_ids = {c.component_id for c in batteries}
-
-        battery_status_channel = Broadcast[BatteryStatus]("battery-status")
-
-        channel = Broadcast[Request]("power_distributor")
-        channel_registry = ChannelRegistry(name="power_distributor")
-        power_distributor = PowerDistributingActor(
-            requests_receiver=channel.new_receiver(),
-            channel_registry=channel_registry,
-            battery_status_sender=battery_status_channel.new_sender(),
-        )
-
-        sender = channel.new_sender()
-        namespace: str = "namespace"
-        # Set power 1200W to given batteries.
-        request = Request(
-            namespace=namespace,
-            power=1200.0,
-            batteries=batteries_ids,
-            request_timeout_sec=10.0
-        )
-        await sender.send(request)
-        result_rx = channel_registry.new_receiver(namespace)
-
-        # It is recommended to use timeout when waiting for the response!
-        result: Result = await asyncio.wait_for(result_rx.receive(), timeout=10)
-
-        if isinstance(result, Success):
-            print("Command succeed")
-        elif isinstance(result, PartialFailure):
-            print(
-                f"Batteries {result.failed_batteries} failed, total failed power" \
-                f"{result.failed_power}"
-            )
-        elif isinstance(result, Ignored):
-            print("Request was ignored, because of newer request")
-        elif isinstance(result, Error):
-            print(f"Request failed with error: {result.msg}")
-        ```
     """
 
     def __init__(
@@ -181,6 +115,8 @@ class PowerDistributingActor:
         channel_registry: ChannelRegistry,
         battery_status_sender: Sender[BatteryStatus],
         wait_for_data_sec: float = 2,
+        *,
+        name: str | None = None,
     ) -> None:
         """Create class instance.
 
@@ -192,7 +128,10 @@ class PowerDistributingActor:
                 working.
             wait_for_data_sec: How long actor should wait before processing first
                 request. It is a time needed to collect first components data.
+            name: The name of the actor. If `None`, `str(id(self))` will be used. This
+                is used mostly for debugging purposes.
         """
+        super().__init__(name=name)
         self._requests_receiver = requests_receiver
         self._channel_registry = channel_registry
         self._wait_for_data_sec = wait_for_data_sec
@@ -226,48 +165,47 @@ class PowerDistributingActor:
             bat_id: None for bat_id, _ in self._bat_inv_map.items()
         }
 
-    def _get_upper_bound(self, batteries: abc.Set[int], include_broken: bool) -> float:
-        """Get total upper bound of power to be set for given batteries.
-
-        Note, output of that function doesn't guarantee that this bound will be
-        the same when the request is processed.
-
-        Args:
-            batteries: List of batteries
-            include_broken: whether all batteries in the batteries set in the
-                request must be used regardless the status.
-
-        Returns:
-            Upper bound for `set_power` operation.
-        """
-        pairs_data: List[InvBatPair] = self._get_components_data(
-            batteries, include_broken
-        )
-        return sum(
-            min(battery.power_upper_bound, inverter.active_power_upper_bound)
-            for battery, inverter in pairs_data
-        )
-
-    def _get_lower_bound(self, batteries: abc.Set[int], include_broken: bool) -> float:
-        """Get total lower bound of power to be set for given batteries.
-
-        Note, output of that function doesn't guarantee that this bound will be
-        the same when the request is processed.
+    def _get_bounds(
+        self,
+        pairs_data: list[InvBatPair],
+    ) -> PowerBounds:
+        """Get power bounds for given batteries.
 
         Args:
-            batteries: List of batteries
-            include_broken: whether all batteries in the batteries set in the
-                request must be used regardless the status.
+            pairs_data: list of battery and adjacent inverter data pairs.
 
         Returns:
-            Lower bound for `set_power` operation.
+            Power bounds for given batteries.
         """
-        pairs_data: List[InvBatPair] = self._get_components_data(
-            batteries, include_broken
-        )
-        return sum(
-            max(battery.power_lower_bound, inverter.active_power_lower_bound)
-            for battery, inverter in pairs_data
+        return PowerBounds(
+            inclusion_lower=sum(
+                max(
+                    battery.power_inclusion_lower_bound,
+                    inverter.active_power_inclusion_lower_bound,
+                )
+                for battery, inverter in pairs_data
+            ),
+            inclusion_upper=sum(
+                min(
+                    battery.power_inclusion_upper_bound,
+                    inverter.active_power_inclusion_upper_bound,
+                )
+                for battery, inverter in pairs_data
+            ),
+            exclusion_lower=sum(
+                min(
+                    battery.power_exclusion_lower_bound,
+                    inverter.active_power_exclusion_lower_bound,
+                )
+                for battery, inverter in pairs_data
+            ),
+            exclusion_upper=sum(
+                max(
+                    battery.power_exclusion_upper_bound,
+                    inverter.active_power_exclusion_upper_bound,
+                )
+                for battery, inverter in pairs_data
+            ),
         )
 
     async def _send_result(self, namespace: str, result: Result) -> None:
@@ -284,7 +222,7 @@ class PowerDistributingActor:
 
         await self._result_senders[namespace].send(result)
 
-    async def run(self) -> None:
+    async def _run(self) -> None:
         """Run actor main function.
 
         It waits for new requests in task_queue and process it, and send
@@ -301,11 +239,6 @@ class PowerDistributingActor:
         await asyncio.sleep(self._wait_for_data_sec)
 
         async for request in self._requests_receiver:
-            error = self._check_request(request)
-            if error:
-                await self._send_result(request.namespace, error)
-                continue
-
             try:
                 pairs_data: List[InvBatPair] = self._get_components_data(
                     request.batteries, request.include_broken_batteries
@@ -323,9 +256,15 @@ class PowerDistributingActor:
                 )
                 continue
 
+            error = self._check_request(request, pairs_data)
+            if error:
+                await self._send_result(request.namespace, error)
+                continue
+
             try:
                 distribution = self._get_power_distribution(request, pairs_data)
             except ValueError as err:
+                _logger.exception("Couldn't distribute power")
                 error_msg = f"Couldn't distribute power, error: {str(err)}"
                 await self._send_result(
                     request.namespace, Error(request=request, msg=str(error_msg))
@@ -446,11 +385,16 @@ class PowerDistributingActor:
 
         return result
 
-    def _check_request(self, request: Request) -> Optional[Result]:
+    def _check_request(
+        self,
+        request: Request,
+        pairs_data: List[InvBatPair],
+    ) -> Optional[Result]:
         """Check whether the given request if correct.
 
         Args:
             request: request to check
+            pairs_data: list of battery and adjacent inverter data pairs.
 
         Returns:
             Result for the user if the request is wrong, None otherwise.
@@ -466,19 +410,30 @@ class PowerDistributingActor:
                 )
                 return Error(request=request, msg=msg)
 
-        if not request.adjust_power:
-            if request.power < 0:
-                bound = self._get_lower_bound(
-                    request.batteries, request.include_broken_batteries
-                )
-                if request.power < bound:
-                    return OutOfBound(request=request, bound=bound)
-            else:
-                bound = self._get_upper_bound(
-                    request.batteries, request.include_broken_batteries
-                )
-                if request.power > bound:
-                    return OutOfBound(request=request, bound=bound)
+        bounds = self._get_bounds(pairs_data)
+
+        # Zero power requests are always forwarded to the microgrid API, even if they
+        # are outside the exclusion bounds.
+        if is_close_to_zero(request.power):
+            return None
+
+        if request.adjust_power:
+            # Automatic power adjustments can only bring down the requested power down
+            # to the inclusion bounds.
+            #
+            # If the requested power is in the exclusion bounds, it is NOT possible to
+            # increase it so that it is outside the exclusion bounds.
+            if bounds.exclusion_lower < request.power < bounds.exclusion_upper:
+                return OutOfBounds(request=request, bounds=bounds)
+        else:
+            in_lower_range = (
+                bounds.inclusion_lower <= request.power <= bounds.exclusion_lower
+            )
+            in_upper_range = (
+                bounds.exclusion_upper <= request.power <= bounds.inclusion_upper
+            )
+            if not (in_lower_range or in_upper_range):
+                return OutOfBounds(request=request, bounds=bounds)
 
         return None
 
@@ -622,10 +577,10 @@ class PowerDistributingActor:
             return None
 
         replaceable_metrics = [
-            battery_data.power_lower_bound,
-            battery_data.power_upper_bound,
-            inverter_data.active_power_lower_bound,
-            inverter_data.active_power_upper_bound,
+            battery_data.power_inclusion_lower_bound,
+            battery_data.power_inclusion_upper_bound,
+            inverter_data.active_power_inclusion_lower_bound,
+            inverter_data.active_power_inclusion_upper_bound,
         ]
 
         # If all values are ok then return them.
@@ -637,8 +592,8 @@ class PowerDistributingActor:
         # Replace NaN with the corresponding value in the adjacent component.
         # If both metrics are None, return None to ignore this battery.
         replaceable_pairs = [
-            ("power_lower_bound", "active_power_lower_bound"),
-            ("power_upper_bound", "active_power_upper_bound"),
+            ("power_inclusion_lower_bound", "active_power_inclusion_lower_bound"),
+            ("power_inclusion_upper_bound", "active_power_inclusion_upper_bound"),
         ]
 
         battery_new_metrics = {}
@@ -737,7 +692,11 @@ class PowerDistributingActor:
 
         await asyncio.gather(*tasks, return_exceptions=True)
 
-    async def _stop_actor(self) -> None:
-        """Stop all running async tasks."""
+    async def stop(self, msg: str | None = None) -> None:
+        """Stop this actor.
+
+        Args:
+            msg: The message to be passed to the tasks being cancelled.
+        """
         await self._all_battery_status.stop()
-        await self._stop()  # type: ignore # pylint: disable=no-member
+        await super().stop(msg)

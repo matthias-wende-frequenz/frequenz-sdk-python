@@ -12,16 +12,19 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Iterable, Optional, Set, TypeVar, Union
 
+# pylint: disable=no-name-in-module
 from frequenz.api.microgrid.battery_pb2 import ComponentState as BatteryComponentState
 from frequenz.api.microgrid.battery_pb2 import RelayState as BatteryRelayState
 from frequenz.api.microgrid.common_pb2 import ErrorLevel
 from frequenz.api.microgrid.inverter_pb2 import ComponentState as InverterComponentState
+
+# pylint: enable=no-name-in-module
 from frequenz.channels import Receiver, Sender
 from frequenz.channels.util import Timer, select, selected_from
 
-from frequenz.sdk._internal._asyncio import cancel_and_await
-from frequenz.sdk.microgrid import connection_manager
-from frequenz.sdk.microgrid.component import (
+from ..._internal._asyncio import cancel_and_await
+from ...microgrid import connection_manager
+from ...microgrid.component import (
     BatteryData,
     ComponentCategory,
     ComponentData,
@@ -81,6 +84,10 @@ class _BlockingStatus:
     max_duration_sec: float
 
     def __post_init__(self) -> None:
+        assert self.min_duration_sec <= self.max_duration_sec, (
+            f"Minimum blocking duration ({self.min_duration_sec}) cannot be greater "
+            f"than maximum blocking duration ({self.max_duration_sec})"
+        )
         self.last_blocking_duration_sec: float = self.min_duration_sec
         self.blocked_until: Optional[datetime] = None
 
@@ -335,9 +342,25 @@ class BatteryStatusTracker:
                         self._handle_status_set_power_result(selected.value)
 
                     elif selected_from(selected, battery_timer):
+                        if (
+                            datetime.now(tz=timezone.utc)
+                            - self._battery.last_msg_timestamp
+                        ) < timedelta(seconds=self._max_data_age):
+                            # This means that we have received data from the battery
+                            # since the timer triggered, but the timer event arrived
+                            # late, so we can ignore it.
+                            continue
                         self._handle_status_battery_timer()
 
                     elif selected_from(selected, inverter_timer):
+                        if (
+                            datetime.now(tz=timezone.utc)
+                            - self._inverter.last_msg_timestamp
+                        ) < timedelta(seconds=self._max_data_age):
+                            # This means that we have received data from the inverter
+                            # since the timer triggered, but the timer event arrived
+                            # late, so we can ignore it.
+                            continue
                         self._handle_status_inverter_timer()
 
                     else:

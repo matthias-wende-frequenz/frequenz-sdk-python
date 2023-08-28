@@ -2,6 +2,9 @@
 # Copyright © 2023 Frequenz Energy-as-a-Service GmbH
 
 """Tests for battery pool."""
+
+# pylint: disable=too-many-lines
+
 from __future__ import annotations
 
 import asyncio
@@ -25,8 +28,8 @@ from frequenz.sdk._internal._constants import (
 from frequenz.sdk.actor import ResamplerConfig
 from frequenz.sdk.actor.power_distributing import BatteryStatus
 from frequenz.sdk.microgrid.component import ComponentCategory
-from frequenz.sdk.timeseries import Energy, Percentage, Power, Sample
-from frequenz.sdk.timeseries.battery_pool import BatteryPool, Bound, PowerMetrics
+from frequenz.sdk.timeseries import Energy, Percentage, Power, Sample, Temperature
+from frequenz.sdk.timeseries.battery_pool import BatteryPool, Bounds, PowerMetrics
 from frequenz.sdk.timeseries.battery_pool._metric_calculator import (
     battery_inverter_mapping,
 )
@@ -44,6 +47,8 @@ _logger = logging.getLogger(__name__)
 
 # pylint doesn't understand fixtures. It thinks it is redefined name.
 # pylint: disable=redefined-outer-name
+
+# pylint: disable=too-many-lines
 
 
 @pytest.fixture()
@@ -131,7 +136,7 @@ async def setup_all_batteries(mocker: MockerFixture) -> AsyncIterator[SetupArgs]
     min_update_interval: float = 0.2
     # pylint: disable=protected-access
     microgrid._data_pipeline._DATA_PIPELINE = None
-    microgrid._data_pipeline.initialize(
+    await microgrid._data_pipeline.initialize(
         ResamplerConfig(resampling_period=timedelta(seconds=min_update_interval))
     )
     streamer = MockComponentDataStreamer(mock_microgrid)
@@ -183,7 +188,7 @@ async def setup_batteries_pool(mocker: MockerFixture) -> AsyncIterator[SetupArgs
     min_update_interval: float = 0.2
     # pylint: disable=protected-access
     microgrid._data_pipeline._DATA_PIPELINE = None
-    microgrid._data_pipeline.initialize(
+    await microgrid._data_pipeline.initialize(
         ResamplerConfig(resampling_period=timedelta(seconds=min_update_interval))
     )
 
@@ -337,6 +342,24 @@ async def test_battery_pool_power_bounds(setup_batteries_pool: SetupArgs) -> Non
     await run_power_bounds_test(setup_batteries_pool)
 
 
+async def test_all_batteries_temperature(setup_all_batteries: SetupArgs) -> None:
+    """Test temperature for battery pool with all components in the microgrid.
+
+    Args:
+        setup_all_batteries: Fixture that creates needed microgrid tools.
+    """
+    await run_temperature_test(setup_all_batteries)
+
+
+async def test_battery_pool_temperature(setup_batteries_pool: SetupArgs) -> None:
+    """Test temperature for battery pool with subset of components in the microgrid.
+
+    Args:
+        setup_all_batteries: Fixture that creates needed microgrid tools.
+    """
+    await run_temperature_test(setup_batteries_pool)
+
+
 def assert_dataclass(arg: Any) -> None:
     """Raise assert error if argument is not dataclass.
 
@@ -438,7 +461,7 @@ async def run_test_battery_status_channel(  # pylint: disable=too-many-arguments
 
 async def test_battery_pool_power(mocker: MockerFixture) -> None:
     """Test `BatteryPool.{,production,consumption}_power` methods."""
-    mockgrid = MockMicrogrid(grid_side_meter=True)
+    mockgrid = MockMicrogrid(grid_meter=True)
     mockgrid.add_batteries(2)
     await mockgrid.start(mocker)
 
@@ -808,8 +831,10 @@ async def run_power_bounds_test(  # pylint: disable=too-many-locals
             BatteryDataWrapper(
                 component_id=battery_id,
                 timestamp=datetime.now(tz=timezone.utc),
-                power_lower_bound=-1000,
-                power_upper_bound=5000,
+                power_inclusion_lower_bound=-1000,
+                power_inclusion_upper_bound=5000,
+                power_exclusion_lower_bound=-300,
+                power_exclusion_upper_bound=300,
             ),
             sampling_rate=0.05,
         )
@@ -817,8 +842,10 @@ async def run_power_bounds_test(  # pylint: disable=too-many-locals
             InverterDataWrapper(
                 component_id=inverter_id,
                 timestamp=datetime.now(tz=timezone.utc),
-                active_power_lower_bound=-900,
-                active_power_upper_bound=6000,
+                active_power_inclusion_lower_bound=-900,
+                active_power_inclusion_upper_bound=6000,
+                active_power_exclusion_lower_bound=-200,
+                active_power_exclusion_upper_bound=200,
             ),
             sampling_rate=0.1,
         )
@@ -832,8 +859,8 @@ async def run_power_bounds_test(  # pylint: disable=too-many-locals
     now = datetime.now(tz=timezone.utc)
     expected = PowerMetrics(
         timestamp=now,
-        supply_bound=Bound(-1800, 0),
-        consume_bound=Bound(0, 10000),
+        inclusion_bounds=Bounds(Power.from_watts(-1800), Power.from_watts(10000)),
+        exclusion_bounds=Bounds(Power.from_watts(-600), Power.from_watts(600)),
     )
     compare_messages(msg, expected, WAIT_FOR_COMPONENT_DATA_SEC + 0.2)
 
@@ -841,25 +868,53 @@ async def run_power_bounds_test(  # pylint: disable=too-many-locals
     scenarios: list[Scenario[PowerMetrics]] = [
         Scenario(
             bat_inv_map[batteries_in_pool[0]],
-            {"active_power_lower_bound": -100},
-            PowerMetrics(now, Bound(-1000, 0), Bound(0, 10000)),
+            {
+                "active_power_inclusion_lower_bound": -100,
+                "active_power_exclusion_lower_bound": -400,
+            },
+            PowerMetrics(
+                now,
+                Bounds(Power.from_watts(-1000), Power.from_watts(10000)),
+                Bounds(Power.from_watts(-700), Power.from_watts(600)),
+            ),
         ),
         # Inverter bound changed, but metric result should not change.
         Scenario(
             component_id=bat_inv_map[batteries_in_pool[0]],
-            new_metrics={"active_power_upper_bound": 9000},
+            new_metrics={
+                "active_power_inclusion_upper_bound": 9000,
+                "active_power_exclusion_upper_bound": 250,
+            },
             expected_result=None,
             wait_for_result=False,
         ),
         Scenario(
             batteries_in_pool[0],
-            {"power_lower_bound": 0, "power_upper_bound": 4000},
-            PowerMetrics(now, Bound(-900, 0), Bound(0, 9000)),
+            {
+                "power_inclusion_lower_bound": 0,
+                "power_inclusion_upper_bound": 4000,
+                "power_exclusion_lower_bound": 0,
+                "power_exclusion_upper_bound": 100,
+            },
+            PowerMetrics(
+                now,
+                Bounds(Power.from_watts(-900), Power.from_watts(9000)),
+                Bounds(Power.from_watts(-700), Power.from_watts(550)),
+            ),
         ),
         Scenario(
             batteries_in_pool[1],
-            {"power_lower_bound": -10, "power_upper_bound": 200},
-            PowerMetrics(now, Bound(-10, 0), Bound(0, 4200)),
+            {
+                "power_inclusion_lower_bound": -10,
+                "power_inclusion_upper_bound": 200,
+                "power_exclusion_lower_bound": -5,
+                "power_exclusion_upper_bound": 5,
+            },
+            PowerMetrics(
+                now,
+                Bounds(Power.from_watts(-10), Power.from_watts(4200)),
+                Bounds(Power.from_watts(-600), Power.from_watts(450)),
+            ),
         ),
         # Test 2 things:
         # 1. Battery is sending upper bounds=NaN, use only inverter upper bounds
@@ -867,75 +922,296 @@ async def run_power_bounds_test(  # pylint: disable=too-many-locals
         # Setting upper bound to NaN should not influence lower bound
         Scenario(
             batteries_in_pool[0],
-            {"power_lower_bound": -50, "power_upper_bound": math.nan},
-            PowerMetrics(now, Bound(-60, 0), Bound(0, 9200)),
+            {
+                "power_inclusion_lower_bound": -50,
+                "power_inclusion_upper_bound": math.nan,
+                "power_exclusion_lower_bound": -30,
+                "power_exclusion_upper_bound": 300,
+            },
+            PowerMetrics(
+                now,
+                Bounds(Power.from_watts(-60), Power.from_watts(9200)),
+                Bounds(Power.from_watts(-600), Power.from_watts(500)),
+            ),
         ),
         Scenario(
             bat_inv_map[batteries_in_pool[0]],
             {
-                "active_power_lower_bound": math.nan,
-                "active_power_upper_bound": math.nan,
+                "active_power_inclusion_lower_bound": math.nan,
+                "active_power_inclusion_upper_bound": math.nan,
+                "active_power_exclusion_lower_bound": math.nan,
+                "active_power_exclusion_upper_bound": math.nan,
             },
-            PowerMetrics(now, Bound(-60, 0), Bound(0, 200)),
+            PowerMetrics(
+                now,
+                Bounds(Power.from_watts(-60), Power.from_watts(200)),
+                Bounds(Power.from_watts(-230), Power.from_watts(500)),
+            ),
         ),
         Scenario(
             batteries_in_pool[0],
-            {"power_lower_bound": math.nan},
-            PowerMetrics(now, Bound(-10, 0), Bound(0, 200)),
+            {
+                "power_inclusion_lower_bound": math.nan,
+                "power_exclusion_lower_bound": math.nan,
+            },
+            PowerMetrics(
+                now,
+                Bounds(Power.from_watts(-10), Power.from_watts(200)),
+                Bounds(Power.from_watts(-200), Power.from_watts(500)),
+            ),
         ),
         Scenario(
             batteries_in_pool[1],
             {
-                "power_lower_bound": -100,
-                "power_upper_bound": math.nan,
+                "power_inclusion_lower_bound": -100,
+                "power_inclusion_upper_bound": math.nan,
+                "power_exclusion_lower_bound": -50,
+                "power_exclusion_upper_bound": 50,
             },
-            PowerMetrics(now, Bound(-100, 0), Bound(0, 6000)),
+            PowerMetrics(
+                now,
+                Bounds(Power.from_watts(-100), Power.from_watts(6000)),
+                Bounds(Power.from_watts(-200), Power.from_watts(500)),
+            ),
         ),
         Scenario(
             bat_inv_map[batteries_in_pool[1]],
             {
-                "active_power_lower_bound": math.nan,
-                "active_power_upper_bound": math.nan,
+                "active_power_inclusion_lower_bound": math.nan,
+                "active_power_inclusion_upper_bound": math.nan,
+                "active_power_exclusion_lower_bound": math.nan,
+                "active_power_exclusion_upper_bound": math.nan,
             },
-            PowerMetrics(now, Bound(-100, 0), Bound(0, 0)),
+            PowerMetrics(
+                now,
+                Bounds(Power.from_watts(-100), Power.zero()),
+                Bounds(Power.from_watts(-50), Power.from_watts(350)),
+            ),
         ),
         # All components are sending NaN, can't calculate bounds
         Scenario(
             batteries_in_pool[1],
             {
-                "power_lower_bound": math.nan,
-                "power_upper_bound": math.nan,
+                "power_inclusion_lower_bound": math.nan,
+                "power_inclusion_upper_bound": math.nan,
             },
             None,
         ),
         Scenario(
             batteries_in_pool[0],
-            {"power_lower_bound": -100, "power_upper_bound": 100},
-            PowerMetrics(now, Bound(-100, 0), Bound(0, 100)),
+            {
+                "power_inclusion_lower_bound": -100,
+                "power_inclusion_upper_bound": 100,
+                "power_exclusion_lower_bound": -20,
+                "power_exclusion_upper_bound": 20,
+            },
+            PowerMetrics(
+                now,
+                Bounds(Power.from_watts(-100), Power.from_watts(100)),
+                Bounds(Power.from_watts(-70), Power.from_watts(70)),
+            ),
         ),
         Scenario(
             bat_inv_map[batteries_in_pool[1]],
             {
-                "active_power_lower_bound": -400,
-                "active_power_upper_bound": 400,
+                "active_power_inclusion_lower_bound": -400,
+                "active_power_inclusion_upper_bound": 400,
+                "active_power_exclusion_lower_bound": -100,
+                "active_power_exclusion_upper_bound": 100,
             },
-            PowerMetrics(now, Bound(-500, 0), Bound(0, 500)),
+            PowerMetrics(
+                now,
+                Bounds(Power.from_watts(-500), Power.from_watts(500)),
+                Bounds(Power.from_watts(-120), Power.from_watts(120)),
+            ),
         ),
         Scenario(
             batteries_in_pool[1],
             {
-                "power_lower_bound": -300,
-                "power_upper_bound": 700,
+                "power_inclusion_lower_bound": -300,
+                "power_inclusion_upper_bound": 700,
+                "power_exclusion_lower_bound": -130,
+                "power_exclusion_upper_bound": 130,
             },
-            PowerMetrics(now, Bound(-400, 0), Bound(0, 500)),
+            PowerMetrics(
+                now,
+                Bounds(Power.from_watts(-400), Power.from_watts(500)),
+                Bounds(Power.from_watts(-150), Power.from_watts(150)),
+            ),
         ),
         Scenario(
             bat_inv_map[batteries_in_pool[0]],
             {
-                "active_power_lower_bound": -200,
-                "active_power_upper_bound": 50,
+                "active_power_inclusion_lower_bound": -200,
+                "active_power_inclusion_upper_bound": 50,
+                "active_power_exclusion_lower_bound": -80,
+                "active_power_exclusion_upper_bound": 80,
             },
-            PowerMetrics(now, Bound(-400, 0), Bound(0, 450)),
+            PowerMetrics(
+                now,
+                Bounds(Power.from_watts(-400), Power.from_watts(450)),
+                Bounds(Power.from_watts(-210), Power.from_watts(210)),
+            ),
+        ),
+    ]
+    waiting_time_sec = setup_args.min_update_interval + 0.02
+    await run_scenarios(scenarios, streamer, receiver, waiting_time_sec)
+
+    await run_test_battery_status_channel(
+        battery_status_sender=battery_status_sender,
+        battery_pool_metric_receiver=receiver,
+        all_batteries=all_batteries,
+        batteries_in_pool=batteries_in_pool,
+        waiting_time_sec=waiting_time_sec,
+        all_pool_result=PowerMetrics(
+            now,
+            Bounds(Power.from_watts(-400), Power.from_watts(450)),
+            Bounds(Power.from_watts(-210), Power.from_watts(210)),
+        ),
+        only_first_battery_result=PowerMetrics(
+            now,
+            Bounds(Power.from_watts(-100), Power.from_watts(50)),
+            Bounds(Power.from_watts(-80), Power.from_watts(80)),
+        ),
+    )
+
+    # One battery stopped sending data, inverter data should be used.
+    await streamer.stop_streaming(batteries_in_pool[1])
+    await asyncio.sleep(MAX_BATTERY_DATA_AGE_SEC + 0.2)
+    msg = await asyncio.wait_for(receiver.receive(), timeout=waiting_time_sec)
+    compare_messages(
+        msg,
+        PowerMetrics(
+            now,
+            Bounds(Power.from_watts(-500), Power.from_watts(450)),
+            Bounds(Power.from_watts(-180), Power.from_watts(180)),
+        ),
+        0.2,
+    )
+
+    # All batteries stopped sending data, use inverters only.
+    await streamer.stop_streaming(batteries_in_pool[0])
+    await asyncio.sleep(MAX_BATTERY_DATA_AGE_SEC + 0.2)
+    msg = await asyncio.wait_for(receiver.receive(), timeout=waiting_time_sec)
+    compare_messages(
+        msg,
+        PowerMetrics(
+            now,
+            Bounds(Power.from_watts(-600), Power.from_watts(450)),
+            Bounds(Power.from_watts(-180), Power.from_watts(180)),
+        ),
+        0.2,
+    )
+
+    # One inverter stopped sending data, use one remaining inverter
+    await streamer.stop_streaming(bat_inv_map[batteries_in_pool[0]])
+    await asyncio.sleep(MAX_BATTERY_DATA_AGE_SEC + 0.2)
+    msg = await asyncio.wait_for(receiver.receive(), timeout=waiting_time_sec)
+    compare_messages(
+        msg,
+        PowerMetrics(
+            now,
+            Bounds(Power.from_watts(-400), Power.from_watts(400)),
+            Bounds(Power.from_watts(-100), Power.from_watts(100)),
+        ),
+        0.2,
+    )
+
+    # All components stopped sending data, we can assume that power bounds are 0
+    await streamer.stop_streaming(bat_inv_map[batteries_in_pool[1]])
+    await asyncio.sleep(MAX_BATTERY_DATA_AGE_SEC + 0.2)
+    msg = await asyncio.wait_for(receiver.receive(), timeout=waiting_time_sec)
+    assert msg is None
+
+    # One battery started sending data.
+    latest_data = streamer.get_current_component_data(batteries_in_pool[0])
+    streamer.start_streaming(latest_data, sampling_rate=0.1)
+    msg = await asyncio.wait_for(receiver.receive(), timeout=waiting_time_sec)
+    compare_messages(
+        msg,
+        PowerMetrics(
+            now,
+            Bounds(Power.from_watts(-100), Power.from_watts(100)),
+            Bounds(Power.from_watts(-20), Power.from_watts(20)),
+        ),
+        0.2,
+    )
+
+
+async def run_temperature_test(  # pylint: disable=too-many-locals
+    setup_args: SetupArgs,
+) -> None:
+    """Test if temperature metric is working as expected."""
+    battery_pool = setup_args.battery_pool
+    mock_microgrid = setup_args.mock_microgrid
+    streamer = setup_args.streamer
+    battery_status_sender = setup_args.battery_status_sender
+
+    all_batteries = get_components(mock_microgrid, ComponentCategory.BATTERY)
+    await battery_status_sender.send(
+        BatteryStatus(working=all_batteries, uncertain=set())
+    )
+    bat_inv_map = battery_inverter_mapping(all_batteries)
+
+    for battery_id, inverter_id in bat_inv_map.items():
+        # Sampling rate choose to reflect real application.
+        streamer.start_streaming(
+            BatteryDataWrapper(
+                component_id=battery_id,
+                timestamp=datetime.now(tz=timezone.utc),
+                temperature=25.0,
+            ),
+            sampling_rate=0.05,
+        )
+        streamer.start_streaming(
+            InverterDataWrapper(
+                component_id=inverter_id,
+                timestamp=datetime.now(tz=timezone.utc),
+            ),
+            sampling_rate=0.1,
+        )
+
+    receiver = battery_pool.temperature.new_receiver()
+
+    msg = await asyncio.wait_for(
+        receiver.receive(), timeout=WAIT_FOR_COMPONENT_DATA_SEC + 0.2
+    )
+    now = datetime.now(tz=timezone.utc)
+    expected = Sample(now, value=Temperature.from_celsius(25.0))
+    compare_messages(msg, expected, WAIT_FOR_COMPONENT_DATA_SEC + 0.2)
+
+    batteries_in_pool = list(battery_pool.battery_ids)
+    bat_0, bat_1 = batteries_in_pool
+    scenarios: list[Scenario[Sample[Temperature]]] = [
+        Scenario(
+            bat_0,
+            {"temperature": 30.0},
+            Sample(now, value=Temperature.from_celsius(27.5)),
+        ),
+        Scenario(
+            bat_1,
+            {"temperature": 20.0},
+            Sample(now, value=Temperature.from_celsius(25.0)),
+        ),
+        Scenario(
+            bat_0,
+            {"temperature": math.nan},
+            Sample(now, value=Temperature.from_celsius(20.0)),
+        ),
+        Scenario(
+            bat_1,
+            {"temperature": math.nan},
+            None,
+        ),
+        Scenario(
+            bat_0,
+            {"temperature": 30.0},
+            Sample(now, value=Temperature.from_celsius(30.0)),
+        ),
+        Scenario(
+            bat_1,
+            {"temperature": 15.0},
+            Sample(now, value=Temperature.from_celsius(22.5)),
         ),
     ]
 
@@ -948,36 +1224,24 @@ async def run_power_bounds_test(  # pylint: disable=too-many-locals
         all_batteries=all_batteries,
         batteries_in_pool=batteries_in_pool,
         waiting_time_sec=waiting_time_sec,
-        all_pool_result=PowerMetrics(now, Bound(-400, 0), Bound(0, 450)),
-        only_first_battery_result=PowerMetrics(now, Bound(-100, 0), Bound(0, 50)),
+        all_pool_result=Sample(now, Temperature.from_celsius(22.5)),
+        only_first_battery_result=Sample(now, Temperature.from_celsius(30.0)),
     )
 
-    # One battery stopped sending data, inverter data should be used.
-    await streamer.stop_streaming(batteries_in_pool[1])
+    # one battery stops sending data.
+    await streamer.stop_streaming(bat_1)
     await asyncio.sleep(MAX_BATTERY_DATA_AGE_SEC + 0.2)
     msg = await asyncio.wait_for(receiver.receive(), timeout=waiting_time_sec)
-    compare_messages(msg, PowerMetrics(now, Bound(-500, 0), Bound(0, 450)), 0.2)
+    compare_messages(msg, Sample(now, Temperature.from_celsius(30.0)), 0.2)
 
-    # All batteries stopped sending data, use inverters only.
-    await streamer.stop_streaming(batteries_in_pool[0])
-    await asyncio.sleep(MAX_BATTERY_DATA_AGE_SEC + 0.2)
-    msg = await asyncio.wait_for(receiver.receive(), timeout=waiting_time_sec)
-    compare_messages(msg, PowerMetrics(now, Bound(-600, 0), Bound(0, 450)), 0.2)
-
-    # One inverter stopped sending data, use one remaining inverter
-    await streamer.stop_streaming(bat_inv_map[batteries_in_pool[0]])
-    await asyncio.sleep(MAX_BATTERY_DATA_AGE_SEC + 0.2)
-    msg = await asyncio.wait_for(receiver.receive(), timeout=waiting_time_sec)
-    compare_messages(msg, PowerMetrics(now, Bound(-400, 0), Bound(0, 400)), 0.2)
-
-    # All components stopped sending data, we can assume that power bounds are 0
-    await streamer.stop_streaming(bat_inv_map[batteries_in_pool[1]])
+    # All batteries stopped sending data.
+    await streamer.stop_streaming(bat_0)
     await asyncio.sleep(MAX_BATTERY_DATA_AGE_SEC + 0.2)
     msg = await asyncio.wait_for(receiver.receive(), timeout=waiting_time_sec)
     assert msg is None
 
-    # One battery started sending data.
-    latest_data = streamer.get_current_component_data(batteries_in_pool[0])
+    # one battery started sending data.
+    latest_data = streamer.get_current_component_data(bat_1)
     streamer.start_streaming(latest_data, sampling_rate=0.1)
     msg = await asyncio.wait_for(receiver.receive(), timeout=waiting_time_sec)
-    compare_messages(msg, PowerMetrics(now, Bound(-100, 0), Bound(0, 100)), 0.2)
+    compare_messages(msg, Sample(now, Temperature.from_celsius(15.0)), 0.2)

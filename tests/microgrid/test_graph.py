@@ -7,12 +7,12 @@ Tests for the microgrid component graph.
 
 # pylint: disable=too-many-lines,use-implicit-booleaness-not-comparison
 # pylint: disable=invalid-name,missing-function-docstring,too-many-statements
-# pylint: disable=too-many-lines,protected-access
+# pylint: disable=too-many-lines,protected-access,no-member
 
 from dataclasses import asdict
 from typing import Dict, Set
 
-import frequenz.api.microgrid.microgrid_pb2 as microgrid_pb
+import frequenz.api.common.components_pb2 as components_pb
 import grpc
 import pytest
 
@@ -403,6 +403,116 @@ class TestComponentGraph:
             Connection(2, 6),
         }
 
+    def test_dfs_search_two_grid_meters(self) -> None:
+        """Test DFS searching PV components in a graph with two grid meters."""
+        grid = Component(1, ComponentCategory.GRID)
+        pv_inverters = {
+            Component(4, ComponentCategory.INVERTER, InverterType.SOLAR),
+            Component(5, ComponentCategory.INVERTER, InverterType.SOLAR),
+        }
+
+        graph = gr._MicrogridComponentGraph(
+            components={
+                grid,
+                Component(2, ComponentCategory.METER),
+                Component(3, ComponentCategory.METER),
+            }.union(pv_inverters),
+            connections={
+                Connection(1, 2),
+                Connection(1, 3),
+                Connection(2, 4),
+                Connection(2, 5),
+            },
+        )
+
+        result = graph.dfs(grid, set(), graph.is_pv_inverter)
+        assert result == pv_inverters
+
+    def test_dfs_search_grid_meter(self) -> None:
+        """Test DFS searching PV components in a graph with a single grid meter."""
+        grid = Component(1, ComponentCategory.GRID)
+        pv_meters = {
+            Component(3, ComponentCategory.METER),
+            Component(4, ComponentCategory.METER),
+        }
+
+        graph = gr._MicrogridComponentGraph(
+            components={
+                grid,
+                Component(2, ComponentCategory.METER),
+                Component(5, ComponentCategory.INVERTER, InverterType.SOLAR),
+                Component(6, ComponentCategory.INVERTER, InverterType.SOLAR),
+            }.union(pv_meters),
+            connections={
+                Connection(1, 2),
+                Connection(2, 3),
+                Connection(2, 4),
+                Connection(3, 5),
+                Connection(4, 6),
+            },
+        )
+
+        result = graph.dfs(grid, set(), graph.is_pv_chain)
+        assert result == pv_meters
+
+    def test_dfs_search_no_grid_meter(self) -> None:
+        """Test DFS searching PV components in a graph with no grid meter."""
+        grid = Component(1, ComponentCategory.GRID)
+        pv_meters = {
+            Component(3, ComponentCategory.METER),
+            Component(4, ComponentCategory.METER),
+        }
+
+        graph = gr._MicrogridComponentGraph(
+            components={
+                grid,
+                Component(2, ComponentCategory.METER),
+                Component(5, ComponentCategory.INVERTER, InverterType.SOLAR),
+                Component(6, ComponentCategory.INVERTER, InverterType.SOLAR),
+            }.union(pv_meters),
+            connections={
+                Connection(1, 2),
+                Connection(1, 3),
+                Connection(1, 4),
+                Connection(3, 5),
+                Connection(4, 6),
+            },
+        )
+
+        result = graph.dfs(grid, set(), graph.is_pv_chain)
+        assert result == pv_meters
+
+    def test_dfs_search_nested_components(self) -> None:
+        """Test DFS searching PV components in a graph with nested components."""
+        grid = Component(1, ComponentCategory.GRID)
+        battery_components = {
+            Component(4, ComponentCategory.METER),
+            Component(5, ComponentCategory.METER),
+            Component(6, ComponentCategory.INVERTER, InverterType.BATTERY),
+        }
+
+        graph = gr._MicrogridComponentGraph(
+            components={
+                grid,
+                Component(2, ComponentCategory.METER),
+                Component(3, ComponentCategory.METER),
+                Component(7, ComponentCategory.INVERTER, InverterType.BATTERY),
+                Component(8, ComponentCategory.INVERTER, InverterType.BATTERY),
+            }.union(battery_components),
+            connections={
+                Connection(1, 2),
+                Connection(2, 3),
+                Connection(2, 6),
+                Connection(3, 4),
+                Connection(3, 5),
+                Connection(4, 7),
+                Connection(5, 8),
+            },
+        )
+
+        assert set() == graph.dfs(grid, set(), graph.is_pv_chain)
+        assert battery_components == graph.dfs(grid, set(), graph.is_battery_chain)
+
 
 class Test_MicrogridComponentGraph:
     """Test cases for the package-internal implementation of the ComponentGraph.
@@ -674,7 +784,7 @@ class Test_MicrogridComponentGraph:
             graph.validate()
 
         servicer.set_components(
-            [(1, microgrid_pb.ComponentCategory.COMPONENT_CATEGORY_GRID)]
+            [(1, components_pb.ComponentCategory.COMPONENT_CATEGORY_GRID)]
         )
         servicer.set_connections([])
         with pytest.raises(gr.InvalidGraphError):
@@ -698,9 +808,9 @@ class Test_MicrogridComponentGraph:
         # valid graph with meter, and EV charger
         servicer.set_components(
             [
-                (101, microgrid_pb.ComponentCategory.COMPONENT_CATEGORY_GRID),
-                (111, microgrid_pb.ComponentCategory.COMPONENT_CATEGORY_METER),
-                (131, microgrid_pb.ComponentCategory.COMPONENT_CATEGORY_EV_CHARGER),
+                (101, components_pb.ComponentCategory.COMPONENT_CATEGORY_GRID),
+                (111, components_pb.ComponentCategory.COMPONENT_CATEGORY_METER),
+                (131, components_pb.ComponentCategory.COMPONENT_CATEGORY_EV_CHARGER),
             ]
         )
         servicer.set_connections([(101, 111), (111, 131)])
@@ -723,11 +833,11 @@ class Test_MicrogridComponentGraph:
         # contents will be overwritten
         servicer.set_components(
             [
-                (707, microgrid_pb.ComponentCategory.COMPONENT_CATEGORY_GRID),
-                (717, microgrid_pb.ComponentCategory.COMPONENT_CATEGORY_METER),
-                (727, microgrid_pb.ComponentCategory.COMPONENT_CATEGORY_INVERTER),
-                (737, microgrid_pb.ComponentCategory.COMPONENT_CATEGORY_BATTERY),
-                (747, microgrid_pb.ComponentCategory.COMPONENT_CATEGORY_METER),
+                (707, components_pb.ComponentCategory.COMPONENT_CATEGORY_GRID),
+                (717, components_pb.ComponentCategory.COMPONENT_CATEGORY_METER),
+                (727, components_pb.ComponentCategory.COMPONENT_CATEGORY_INVERTER),
+                (737, components_pb.ComponentCategory.COMPONENT_CATEGORY_BATTERY),
+                (747, components_pb.ComponentCategory.COMPONENT_CATEGORY_METER),
             ]
         )
         servicer.set_connections([(707, 717), (717, 727), (727, 737), (717, 747)])
