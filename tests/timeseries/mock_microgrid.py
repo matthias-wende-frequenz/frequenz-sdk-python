@@ -443,11 +443,14 @@ class MockMicrogrid:  # pylint: disable=too-many-instance-attributes
             self._start_ev_charger_streaming(evc_id)
             self._connections.add(Connection(self._connect_to, evc_id))
 
-    async def send_meter_data(self, values: list[float]) -> None:
+    async def send_meter_data(
+        self, values: list[float], timestamp: datetime | None = None
+    ) -> None:
         """Send raw meter data from the mock microgrid.
 
         Args:
             values: list of active power values for each meter.
+            timestamp: timestamp to use for the data. If None, use current time.
         """
         assert len(values) == len(self.meter_ids)
         timestamp = datetime.now(tz=timezone.utc)
@@ -465,27 +468,35 @@ class MockMicrogrid:  # pylint: disable=too-many-instance-attributes
                 )
             )
 
-    async def send_battery_data(self, socs: list[float]) -> None:
+    async def send_battery_data(
+        self, socs: list[float], timestamp: datetime | None = None
+    ) -> None:
         """Send raw battery data from the mock microgrid.
 
         Args:
             socs: list of soc values for each battery.
+            timestamp: timestamp to use for the data. If None, use current time.
         """
         assert len(socs) == len(self.battery_ids)
-        timestamp = datetime.now(tz=timezone.utc)
+        if not timestamp:
+            timestamp = datetime.now(tz=timezone.utc)
         for comp_id, value in zip(self.battery_ids, socs):
             await self.mock_client.send(
                 BatteryDataWrapper(component_id=comp_id, timestamp=timestamp, soc=value)
             )
 
-    async def send_battery_inverter_data(self, values: list[float]) -> None:
+    async def send_battery_inverter_data(
+        self, values: list[float], timestamp: datetime | None = None
+    ) -> None:
         """Send raw battery inverter data from the mock microgrid.
 
         Args:
             values: list of active power values for each battery inverter.
+            timestamp: timestamp to use for the data. If None, use current time.
         """
         assert len(values) == len(self.battery_inverter_ids)
-        timestamp = datetime.now(tz=timezone.utc)
+        if not timestamp:
+            timestamp = datetime.now(tz=timezone.utc)
         for comp_id, value in zip(self.battery_inverter_ids, values):
             await self.mock_client.send(
                 InverterDataWrapper(
@@ -493,14 +504,18 @@ class MockMicrogrid:  # pylint: disable=too-many-instance-attributes
                 )
             )
 
-    async def send_pv_inverter_data(self, values: list[float]) -> None:
+    async def send_pv_inverter_data(
+        self, values: list[float], timestamp: datetime | None = None
+    ) -> None:
         """Send raw pv inverter data from the mock microgrid.
 
         Args:
             values: list of active power values for each pv inverter.
+            timestamp: timestamp to use for the data. If None, use current time.
         """
         assert len(values) == len(self.pv_inverter_ids)
-        timestamp = datetime.now(tz=timezone.utc)
+        if not timestamp:
+            timestamp = datetime.now(tz=timezone.utc)
         for comp_id, value in zip(self.pv_inverter_ids, values):
             await self.mock_client.send(
                 InverterDataWrapper(
@@ -508,14 +523,18 @@ class MockMicrogrid:  # pylint: disable=too-many-instance-attributes
                 )
             )
 
-    async def send_ev_charger_data(self, values: list[float]) -> None:
+    async def send_ev_charger_data(
+        self, values: list[float], timestamp: datetime | None = None
+    ) -> None:
         """Send raw ev charger data from the mock microgrid.
 
         Args:
             values: list of active power values for each ev charger.
+            timestamp: timestamp to use for the data. If None, use current time.
         """
         assert len(values) == len(self.evc_ids)
-        timestamp = datetime.now(tz=timezone.utc)
+        if not timestamp:
+            timestamp = datetime.now(tz=timezone.utc)
         for comp_id, value in zip(self.evc_ids, values):
             await self.mock_client.send(
                 EvChargerDataWrapper(
