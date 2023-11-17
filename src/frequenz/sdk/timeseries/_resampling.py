@@ -371,29 +371,10 @@ class Resampler:
         self._resamplers: dict[Source, _StreamingHelper] = {}
         """A mapping between sources and the streaming helper handling that source."""
 
-        window_end, start_delay_time = self._calculate_window_end()
-        self._window_end: datetime = window_end
-        """The time in which the current window ends.
-
-        This is used to make sure every resampling window is generated at
-        precise times. We can't rely on the timer timestamp because timers will
-        never fire at the exact requested time, so if we don't use a precise
-        time for the end of the window, the resampling windows we produce will
-        have different sizes.
-
-        The window end will also be aligned to the `config.align_to` time, so
-        the window end is deterministic.
-        """
-
         self._timer: Timer = Timer.periodic(config.resampling_period)
         """The timer used to trigger the resampling windows."""
 
-        # Hack to align the timer, this should be implemented in the Timer class
-        self._timer._next_tick_time = _to_microseconds(
-            timedelta(seconds=asyncio.get_running_loop().time())
-            + config.resampling_period
-            + start_delay_time
-        )  # pylint: disable=protected-access
+        self._window_end = self._sync_timer()
 
     @property
     def config(self) -> ResamplerConfig:
@@ -458,6 +439,35 @@ class Resampler:
             return False
         return True
 
+    def _sync_timer(self) -> datetime:
+        """Resync the timer.
+
+        This method will resync the timer to the current time, so the next
+        resampling window will start at the next multiple of
+        `self._config.resampling_period` starting from now.
+        """
+        window_end, start_delay_time = self._calculate_window_end()
+        """The time in which the current window ends.
+
+        This is used to make sure every resampling window is generated at
+        precise times. We can't rely on the timer timestamp because timers will
+        never fire at the exact requested time, so if we don't use a precise
+        time for the end of the window, the resampling windows we produce will
+        have different sizes.
+
+        The window end will also be aligned to the `config.align_to` time, so
+        the window end is deterministic.
+        """
+
+        # Hack to align the timer, this should be implemented in the Timer class
+        self._timer._next_tick_time = _to_microseconds(
+            timedelta(seconds=asyncio.get_running_loop().time())
+            + self.config.resampling_period
+            + start_delay_time
+        )  # pylint: disable=protected-access
+
+        return window_end
+
     async def resample(self, *, one_shot: bool = False) -> None:
         """Start resampling all known timeseries.
 
@@ -481,9 +491,10 @@ class Resampler:
             seconds=self._config.resampling_period.total_seconds() / 10.0
         )
 
+        print(f"Starting Resampling loop with resampler: {self._resamplers}")
+        print(f"window_end: {self._window_end}")
         async for drift in self._timer:
             now = datetime.now(tz=timezone.utc)
-
             if drift > tolerance:
                 _logger.warning(
                     "The resampling task woke up too late. Resampling should have "
@@ -503,6 +514,7 @@ class Resampler:
             )
 
             self._window_end += self._config.resampling_period
+
             exceptions = {
                 source: results[i]
                 for i, source in enumerate(self._resamplers)
@@ -536,6 +548,7 @@ class Resampler:
         period = self._config.resampling_period
         align_to = self._config.align_to
 
+        print(f"_calculate_window_end: now {now}, period {period}, align_to {align_to}")
         if align_to is None:
             return (now + period, timedelta(0))
 
@@ -550,7 +563,7 @@ class Resampler:
             # enough samples before the first resampling, otherwise the initial window
             # to collect samples could be too small.
             now + period * 2 - elapsed,
-            period - elapsed if elapsed else timedelta(0),
+            period - elapsed,
         )
 
 
@@ -741,7 +754,13 @@ class _ResamplingHelper:
         # So if we need more performance beyond this point, we probably need to
         # resort to some C (or similar) implementation.
         relevant_samples = list(itertools.islice(self._buffer, min_index, max_index))
-        print(f"resampling buffer: {self._buffer}\n* Relevant_samples: {relevant_samples}")
+        print(f"ResamplingHelper.resample: now {datetime.now()}")
+        print(f"ResamplingHelper.resample: timestamp {timestamp}")
+        print(f"ResamplingHelper.resample: min_rel_timestamp {minimum_relevant_timestamp}")
+        print(f"ResamplingHelper.resample: min_index {min_index}, max_index {max_index}")
+        print(
+            f"ResamplingHelper.resample.resampling buffer: {self._buffer}\n* Relevant_samples: {relevant_samples}"
+        )
         value = (
             conf.resampling_function(relevant_samples, conf, props)
             if relevant_samples
