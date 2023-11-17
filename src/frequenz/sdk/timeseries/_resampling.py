@@ -498,6 +498,10 @@ class Resampler:
         async for drift in self._timer:
             now = datetime.now(tz=timezone.utc)
 
+            # resync the window_end to the system time
+            if (self._window_end - now) > self._config.resampling_period:
+                self._window_end = self._sync_timer()
+
             if drift > tolerance:
                 _logger.warning(
                     "The resampling task woke up too late. Resampling should have "
