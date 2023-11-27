@@ -348,6 +348,7 @@ class _DataPipeline:  # pylint: disable=too-many-instance-attributes
             )
             self._data_sourcing_actor = _ActorInfo(actor, channel)
             self._data_sourcing_actor.actor.start()
+            print("\nData sourcing actor started")
         return self._data_sourcing_actor.channel.new_sender()
 
     def _resampling_request_sender(self) -> Sender[ComponentMetricRequest]:

@@ -453,8 +453,12 @@ class MockMicrogrid:  # pylint: disable=too-many-instance-attributes
             timestamp: timestamp to use for the data. If None, use current time.
         """
         assert len(values) == len(self.meter_ids)
-        timestamp = datetime.now(tz=timezone.utc)
+        if not timestamp:
+            timestamp = datetime.now(tz=timezone.utc)
         for comp_id, value in zip(self.meter_ids, values):
+            print(
+                f"Sending meter data for {comp_id} with value {value} and timestamp {timestamp}"
+            )
             await self.mock_client.send(
                 MeterDataWrapper(
                     component_id=comp_id,

@@ -5,12 +5,19 @@
 
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 from pytest_mock import MockerFixture
 
 from frequenz.sdk import microgrid
+<<<<<<< HEAD
 from frequenz.sdk.timeseries._quantities import Frequency, Power
+=======
+from frequenz.sdk.microgrid import _data_pipeline
+from frequenz.sdk.actor import ResamplerConfig
+from frequenz.sdk.microgrid.component import ComponentMetricId
+from frequenz.sdk.timeseries._quantities import Frequency, Power, Quantity
+>>>>>>> b89b2d04 (Tmp)
 from tests.utils import component_data_wrapper
 
 from ._formula_engine.utils import equal_float_lists
@@ -256,6 +263,31 @@ class TestLogicalMeter:  # pylint: disable=too-many-public-methods
 
         await mockgrid.mock_resampler.send_non_existing_component_value()
         assert (await consumer_power_receiver.receive()).value == Power.from_watts(0.0)
+
+    async def test_consumer_power_oos(self, mocker: MockerFixture) -> None:
+        """Test the consumer power formula with a grid meter."""
+        mockgrid = MockMicrogrid(grid_meter=True)
+        mockgrid.start_mock_client(lambda mock_client: mock_client.initialize(mocker))
+        await _data_pipeline.initialize(ResamplerConfig(timedelta(seconds=1)))
+
+        logical_meter = microgrid.logical_meter()
+        # consumer_power_receiver = logical_meter.consumer_power.new_receiver()
+        grid_power = logical_meter.grid_power.new_receiver()
+
+        # make sure the data sourcing actor receives the request
+        await asyncio.sleep(0.001)
+
+        now = datetime.now(tz=timezone.utc)
+        sec = timedelta(seconds=1)
+
+        await mockgrid.send_meter_data([21.0], timestamp=now)
+        assert (await grid_power.receive()).value == Power.from_watts(21.0)
+
+        await mockgrid.send_meter_data([21.0], timestamp=now - 10 * sec)
+        assert (await grid_power.receive()).value == None
+
+        await mockgrid.send_meter_data([21.0], timestamp=now - 9 * sec)
+        assert (await grid_power.receive()).value == None
 
     async def test_producer_power(self, mocker: MockerFixture) -> None:
         """Test the producer power formula."""

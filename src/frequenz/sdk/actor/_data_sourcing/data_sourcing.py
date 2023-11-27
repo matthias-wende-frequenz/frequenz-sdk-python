@@ -37,4 +37,5 @@ class DataSourcingActor(Actor):
     async def _run(self) -> None:
         """Run the actor."""
         async for request in self._request_receiver:
+            print(f"DataSourcingActor: received request: {request}")
             await self._microgrid_api_source.add_metric(request)
