@@ -364,6 +364,7 @@ class Resampler:
         Args:
             config: The configuration for the resampler.
         """
+        print("\nResampler.__init__")
         self._config = config
         """The configuration for this resampler."""
 
@@ -495,6 +496,7 @@ class Resampler:
                     self._config.resampling_period,
                 )
 
+            print(f"Resampler.resample {self._resamplers}")
             results = await asyncio.gather(
                 *[r.resample(self._window_end) for r in self._resamplers.values()],
                 return_exceptions=True,
@@ -739,11 +741,13 @@ class _ResamplingHelper:
         # So if we need more performance beyond this point, we probably need to
         # resort to some C (or similar) implementation.
         relevant_samples = list(itertools.islice(self._buffer, min_index, max_index))
+        print(f"resampling buffer: {self._buffer}\n* Relevant_samples: {relevant_samples}")
         value = (
             conf.resampling_function(relevant_samples, conf, props)
             if relevant_samples
             else None
         )
+        print("Resampler value", value)
         return Sample(timestamp, None if not value else Quantity(value))
 
 
@@ -763,6 +767,7 @@ class _StreamingHelper:
             source: The source to use to get the samples to be resampled.
             sink: The sink to use to send the resampled data.
         """
+        print("init _StreamingHelper", source)
         self._helper: _ResamplingHelper = helper
         self._source: Source = source
         self._sink: Sink = sink
@@ -790,6 +795,7 @@ class _StreamingHelper:
         error).
         """
         async for sample in self._source:
+            print("sample", sample)
             if sample.value is not None and not sample.value.isnan():
                 self._helper.add_sample(sample)
 
