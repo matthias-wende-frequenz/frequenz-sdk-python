@@ -1194,6 +1194,22 @@ async def test_timer_is_aligned(
     sink_mock.reset_mock()
     resampling_fun_mock.reset_mock()
 
+async def test_system_clock_changed(
+    fake_time: time_machine.Coordinates,
+    source_chan: Broadcast[Sample[Quantity]],
+) -> None:
+    """
+    Test that the resampler is able to handle system clock changes.
+    """
+    await _advance_time(fake_time, 600)
+
+    # go back in time
+    event_loop.time()
+    # loop = asyncio.get_running_loop()
+    # loop._selector._clock = 0
+    time_machine.travel(0)
+    assert(False)
+
 
 def _get_buffer_len(resampler: Resampler, source_receiver: Source) -> int:
     # pylint: disable=protected-access
