@@ -5,13 +5,13 @@
 
 import asyncio
 import time
-from typing import Iterator
+from collections.abc import Iterator
 
 import async_solipsism
 import pytest
 import time_machine
 
-from frequenz.sdk.actor import actor, run
+from frequenz.sdk.actor import Actor, run
 
 
 # Setting 'autouse' has no effect as this method replaces the event loop for all tests in the file.
@@ -23,15 +23,7 @@ def event_loop() -> Iterator[async_solipsism.EventLoop]:
     loop.close()
 
 
-@pytest.fixture
-def fake_time() -> Iterator[time_machine.Coordinates]:
-    """Replace real time with a time machine that doesn't automatically tick."""
-    with time_machine.travel(0, tick=False) as traveller:
-        yield traveller
-
-
-@actor
-class FaultyActor:
+class FaultyActor(Actor):
     """A test faulty actor."""
 
     def __init__(self, name: str) -> None:
@@ -40,10 +32,10 @@ class FaultyActor:
         Args:
             name: the name of the faulty actor.
         """
-        self.name = name
+        super().__init__(name=name)
         self.is_cancelled = False
 
-    async def run(self) -> None:
+    async def _run(self) -> None:
         """Run the faulty actor.
 
         Raises:
@@ -53,8 +45,7 @@ class FaultyActor:
         raise asyncio.CancelledError(f"Faulty Actor {self.name} failed")
 
 
-@actor
-class SleepyActor:
+class SleepyActor(Actor):
     """A test actor that sleeps a short time."""
 
     def __init__(self, name: str, sleep_duration: float) -> None:
@@ -64,11 +55,11 @@ class SleepyActor:
             name: the name of the sleepy actor.
             sleep_duration: the virtual duration to sleep while running.
         """
-        self.name = name
+        super().__init__(name=name)
         self.sleep_duration = sleep_duration
         self.is_joined = False
 
-    async def run(self) -> None:
+    async def _run(self) -> None:
         """Run the sleepy actor."""
         while time.time() < self.sleep_duration:
             await asyncio.sleep(0.1)
@@ -79,7 +70,6 @@ class SleepyActor:
 # pylint: disable=redefined-outer-name
 async def test_all_actors_done(fake_time: time_machine.Coordinates) -> None:
     """Test the completion of all actors."""
-
     sleepy_actor_1 = SleepyActor("sleepy_actor_1", sleep_duration=1.0)
     sleepy_actor_2 = SleepyActor("sleepy_actor_2", sleep_duration=2.0)
 
@@ -112,7 +102,6 @@ async def test_all_actors_done(fake_time: time_machine.Coordinates) -> None:
 
 async def test_actors_cancelled() -> None:
     """Test the completion of actors being cancelled."""
-
     faulty_actors = [FaultyActor(f"faulty_actor_{idx}") for idx in range(5)]
 
     await asyncio.wait_for(run(*faulty_actors), timeout=1.0)

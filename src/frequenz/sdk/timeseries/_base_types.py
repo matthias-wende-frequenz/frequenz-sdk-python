@@ -3,12 +3,14 @@
 
 """Timeseries basic types."""
 
+import dataclasses
 import functools
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Callable, Generic, Iterator, Self, overload
+from typing import Generic, Self, TypeVar, overload
 
-from ._quantities import QuantityT
+from ._quantities import Power, QuantityT
 
 UNIX_EPOCH = datetime.fromtimestamp(0.0, tz=timezone.utc)
 """The UNIX epoch (in UTC)."""
@@ -62,12 +64,10 @@ class Sample3Phase(Generic[QuantityT]):
         yield self.value_p3
 
     @overload
-    def max(self, default: QuantityT) -> QuantityT:
-        ...
+    def max(self, default: QuantityT) -> QuantityT: ...
 
     @overload
-    def max(self, default: None = None) -> QuantityT | None:
-        ...
+    def max(self, default: None = None) -> QuantityT | None: ...
 
     def max(self, default: QuantityT | None = None) -> QuantityT | None:
         """Return the max value among all phases, or default if they are all `None`.
@@ -87,12 +87,10 @@ class Sample3Phase(Generic[QuantityT]):
         return value
 
     @overload
-    def min(self, default: QuantityT) -> QuantityT:
-        ...
+    def min(self, default: QuantityT) -> QuantityT: ...
 
     @overload
-    def min(self, default: None = None) -> QuantityT | None:
-        ...
+    def min(self, default: None = None) -> QuantityT | None: ...
 
     def min(self, default: QuantityT | None = None) -> QuantityT | None:
         """Return the min value among all phases, or default if they are all `None`.
@@ -134,3 +132,42 @@ class Sample3Phase(Generic[QuantityT]):
             value_p2=default if self.value_p2 is None else function(self.value_p2),
             value_p3=default if self.value_p3 is None else function(self.value_p3),
         )
+
+
+_T = TypeVar("_T")
+
+
+@dataclass(frozen=True)
+class Bounds(Generic[_T]):
+    """Lower and upper bound values."""
+
+    lower: _T
+    """Lower bound."""
+
+    upper: _T
+    """Upper bound."""
+
+
+@dataclass(frozen=True, kw_only=True)
+class SystemBounds:
+    """Internal representation of system bounds for groups of components."""
+
+    # compare = False tells the dataclass to not use name for comparison methods
+    timestamp: datetime = dataclasses.field(compare=False)
+    """Timestamp of the metrics."""
+
+    inclusion_bounds: Bounds[Power] | None
+    """Total inclusion power bounds for all components of a pool.
+
+    This is the range within which power requests would be allowed by the pool.
+
+    When exclusion bounds are present, they will exclude a subset of the inclusion
+    bounds.
+    """
+
+    exclusion_bounds: Bounds[Power] | None
+    """Total exclusion power bounds for all components of a pool.
+
+    This is the range within which power requests are NOT allowed by the pool.
+    If present, they will be a subset of the inclusion bounds.
+    """

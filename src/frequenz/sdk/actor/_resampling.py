@@ -3,7 +3,6 @@
 
 """An actor to resample microgrid component metrics."""
 
-from __future__ import annotations
 
 import asyncio
 import dataclasses
@@ -15,15 +14,14 @@ from .._internal._asyncio import cancel_and_await
 from ..timeseries import Sample
 from ..timeseries._quantities import Quantity
 from ..timeseries._resampling import Resampler, ResamplerConfig, ResamplingError
+from ._actor import Actor
 from ._channel_registry import ChannelRegistry
 from ._data_sourcing import ComponentMetricRequest
-from ._decorator import actor
 
 _logger = logging.getLogger(__name__)
 
 
-@actor
-class ComponentMetricsResamplingActor:
+class ComponentMetricsResamplingActor(Actor):
     """An actor to resample microgrid component metrics."""
 
     def __init__(  # pylint: disable=too-many-arguments
@@ -33,6 +31,7 @@ class ComponentMetricsResamplingActor:
         data_sourcing_request_sender: Sender[ComponentMetricRequest],
         resampling_request_receiver: Receiver[ComponentMetricRequest],
         config: ResamplerConfig,
+        name: str | None = None,
     ) -> None:
         """Initialize an instance.
 
@@ -43,16 +42,19 @@ class ComponentMetricsResamplingActor:
                 the [`DataSourcingActor`][frequenz.sdk.actor.DataSourcingActor]
                 to subscribe to component metrics.
             resampling_request_receiver: The receiver to use to receive new
-                resampmling subscription requests.
+                resampling subscription requests.
             config: The configuration for the resampler.
+            name: The name of the actor. If `None`, `str(id(self))` will be used. This
+                is used mostly for debugging purposes.
         """
+        super().__init__(name=name)
         self._channel_registry: ChannelRegistry = channel_registry
-        self._data_sourcing_request_sender: Sender[
-            ComponentMetricRequest
-        ] = data_sourcing_request_sender
-        self._resampling_request_receiver: Receiver[
-            ComponentMetricRequest
-        ] = resampling_request_receiver
+        self._data_sourcing_request_sender: Sender[ComponentMetricRequest] = (
+            data_sourcing_request_sender
+        )
+        self._resampling_request_receiver: Receiver[ComponentMetricRequest] = (
+            resampling_request_receiver
+        )
         self._resampler: Resampler = Resampler(config)
         self._active_req_channels: set[str] = set()
 
@@ -75,23 +77,24 @@ class ComponentMetricsResamplingActor:
         )
         data_source_channel_name = data_source_request.get_channel_name()
         await self._data_sourcing_request_sender.send(data_source_request)
-        receiver = self._channel_registry.new_receiver(data_source_channel_name)
+        receiver = self._channel_registry.get_or_create(
+            Sample[Quantity], data_source_channel_name
+        ).new_receiver()
 
         # This is a temporary hack until the Sender implementation uses
         # exceptions to report errors.
-        sender = self._channel_registry.new_sender(request.get_channel_name())
+        sender = self._channel_registry.get_or_create(
+            Sample[Quantity], request_channel_name
+        ).new_sender()
 
-        async def sink_adapter(sample: Sample[Quantity]) -> None:
-            await sender.send(sample)
-
-        self._resampler.add_timeseries(request_channel_name, receiver, sink_adapter)
+        self._resampler.add_timeseries(request_channel_name, receiver, sender.send)
 
     async def _process_resampling_requests(self) -> None:
         """Process resampling data requests."""
         async for request in self._resampling_request_receiver:
             await self._subscribe(request)
 
-    async def run(self) -> None:
+    async def _run(self) -> None:
         """Resample known component metrics and process resampling requests.
 
         If there is a resampling error while resampling some component metric,
@@ -99,11 +102,14 @@ class ComponentMetricsResamplingActor:
         other error will be propagated (most likely ending in the actor being
         restarted).
 
+        This method creates 2 main tasks:
+
+        - One task to process incoming subscription requests to resample new metrics.
+        - One task to run the resampler.
+
         Raises:
             RuntimeError: If there is some unexpected error while resampling or
                 handling requests.
-
-        # noqa: DAR401 error
         """
         tasks_to_cancel: set[asyncio.Task[None]] = set()
         try:

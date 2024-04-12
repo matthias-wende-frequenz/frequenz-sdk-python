@@ -9,14 +9,14 @@ the performance of a numpy implementation with a python
 implementation.
 """
 
-from __future__ import annotations
 
 import asyncio
+import collections.abc
+import contextlib
 import logging
 from datetime import datetime, timedelta, timezone
 from functools import partial
 from timeit import timeit
-from typing import List
 
 import numpy as np
 from frequenz.channels import Broadcast
@@ -27,19 +27,23 @@ from frequenz.sdk.timeseries import MovingWindow, PeriodicFeatureExtractor, Samp
 from frequenz.sdk.timeseries._quantities import Quantity
 
 
-async def init_feature_extractor(period: int) -> PeriodicFeatureExtractor:
+@contextlib.asynccontextmanager
+async def init_feature_extractor(
+    period: int,
+) -> collections.abc.AsyncIterator[PeriodicFeatureExtractor]:
     """Initialize the PeriodicFeatureExtractor class."""
     # We only need the moving window to initialize the PeriodicFeatureExtractor class.
-    lm_chan = Broadcast[Sample[Quantity]]("lm_net_power")
-    moving_window = MovingWindow(
+    lm_chan = Broadcast[Sample[Quantity]](name="lm_net_power")
+    async with MovingWindow(
         timedelta(seconds=1), lm_chan.new_receiver(), timedelta(seconds=1)
-    )
+    ) as moving_window:
+        await lm_chan.new_sender().send(
+            Sample(datetime.now(tz=timezone.utc), Quantity(0))
+        )
 
-    await lm_chan.new_sender().send(Sample(datetime.now(tz=timezone.utc), Quantity(0)))
-
-    # Initialize the PeriodicFeatureExtractor class with a period of period seconds.
-    # This works since the sampling period is set to 1 second.
-    return PeriodicFeatureExtractor(moving_window, timedelta(seconds=period))
+        # Initialize the PeriodicFeatureExtractor class with a period of period seconds.
+        # This works since the sampling period is set to 1 second.
+        yield PeriodicFeatureExtractor(moving_window, timedelta(seconds=period))
 
 
 def _calculate_avg_window(
@@ -58,7 +62,6 @@ def _calculate_avg_window(
         feature_extractor: The instance of the PeriodicFeatureExtractor to use.
         window: The window to calculate the average over.
         window_size: The size of the window to calculate the average over.
-        weights: The weights to use for the average calculation.
 
     Returns:
         The averaged window.
@@ -74,7 +77,7 @@ def _calculate_avg_window_py(
     feature_extractor: PeriodicFeatureExtractor,
     window: NDArray[np.float_],
     window_size: int,
-    weights: List[float] | None = None,
+    weights: list[float] | None = None,
 ) -> NDArray[np.float_]:
     """
     Plain python version of the average calculator.
@@ -107,12 +110,21 @@ def _calculate_avg_window_py(
         Args:
             window: The buffer that is used for the average calculation.
             window_size: The size of the window in samples.
+            period: The distance between two succeeding intervals in samples.
 
         Returns:
             The number of windows that are fully contained in the MovingWindow.
         """
-        num_windows = len(window) // period
-        if len(window) - num_windows * period >= window_size:
+
+        def length(window: NDArray[np.float_] | MovingWindow) -> int:
+            return (
+                window.count_valid()
+                if isinstance(window, MovingWindow)
+                else len(window)
+            )
+
+        num_windows = length(window) // period
+        if length(window) - num_windows * period >= window_size:
             num_windows += 1
 
         return num_windows
@@ -162,7 +174,7 @@ def run_benchmark(
         The return value is discarded such that it can be used by timit.
 
         Args:
-            a: The array containing all data.
+            array: The array containing all data.
             window_size: The size of the window.
             feature_extractor: An instance of the PeriodicFeatureExtractor.
         """
@@ -179,7 +191,7 @@ def run_benchmark(
         The return value is discarded such that it can be used by timit.
 
         Args:
-            a: The array containing all data.
+            array: The array containing all data.
             window_size: The size of the window.
             feature_extractor: An instance of the PeriodicFeatureExtractor.
         """
@@ -211,22 +223,22 @@ async def main() -> None:
 
     # create a random ndarray with 29 days -5 seconds of data
     days_29_s = 29 * DAY_S
-    feature_extractor = await init_feature_extractor(10)
-    data = rng.standard_normal(days_29_s)
-    run_benchmark(data, 4, feature_extractor)
+    async with init_feature_extractor(10) as feature_extractor:
+        data = rng.standard_normal(days_29_s)
+        run_benchmark(data, 4, feature_extractor)
 
-    days_29_s = 29 * DAY_S + 3
-    data = rng.standard_normal(days_29_s)
-    run_benchmark(data, 4, feature_extractor)
+        days_29_s = 29 * DAY_S + 3
+        data = rng.standard_normal(days_29_s)
+        run_benchmark(data, 4, feature_extractor)
 
-    # create a random ndarray with 29 days +5 seconds of data
-    data = rng.standard_normal(29 * DAY_S + 5)
+        # create a random ndarray with 29 days +5 seconds of data
+        data = rng.standard_normal(29 * DAY_S + 5)
 
-    feature_extractor = await init_feature_extractor(7 * DAY_S)
-    # TEST one day window and 6 days distance. COPY (Case 3)
-    run_benchmark(data, DAY_S, feature_extractor)
-    # benchmark one day window and 6 days distance. NO COPY (Case 1)
-    run_benchmark(data[: 28 * DAY_S], DAY_S, feature_extractor)
+    async with init_feature_extractor(7 * DAY_S) as feature_extractor:
+        # TEST one day window and 6 days distance. COPY (Case 3)
+        run_benchmark(data, DAY_S, feature_extractor)
+        # benchmark one day window and 6 days distance. NO COPY (Case 1)
+        run_benchmark(data[: 28 * DAY_S], DAY_S, feature_extractor)
 
 
 logging.basicConfig(level=logging.DEBUG)

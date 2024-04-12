@@ -3,7 +3,6 @@
 
 """Tests for the `OrderedRingbuffer` class."""
 
-from __future__ import annotations
 
 import random
 from datetime import datetime, timedelta, timezone
@@ -16,6 +15,7 @@ import pytest
 from frequenz.sdk.timeseries import Sample
 from frequenz.sdk.timeseries._quantities import Quantity
 from frequenz.sdk.timeseries._ringbuffer import Gap, OrderedRingBuffer
+from frequenz.sdk.timeseries._ringbuffer.buffer import FloatArray
 
 FIVE_MINUTES = timedelta(minutes=5)
 ONE_MINUTE = timedelta(minutes=1)
@@ -137,12 +137,11 @@ def test_timestamp_ringbuffer_gaps(
         Sample(datetime.fromtimestamp(500 + size, tz=timezone.utc), Quantity(9999))
     )
 
-    # Expect exception for the same window
-    with pytest.raises(IndexError):
-        buffer.window(
-            datetime.fromtimestamp(200, tz=timezone.utc),
-            datetime.fromtimestamp(202, tz=timezone.utc),
-        )
+    # Allow still to request old (empty) window
+    buffer.window(
+        datetime.fromtimestamp(200, tz=timezone.utc),
+        datetime.fromtimestamp(202, tz=timezone.utc),
+    )
 
     # Receive new window without exception
     buffer.window(
@@ -182,13 +181,108 @@ def test_timestamp_ringbuffer_missing_parameter(
     ) == datetime(2, 2, 2, 0, 10, tzinfo=timezone.utc)
     buffer.update(Sample(datetime(2, 2, 2, 0, 7, 31, tzinfo=timezone.utc), Quantity(0)))
 
-    assert buffer.datetime_to_index(
+    assert buffer.to_internal_index(
         datetime(2, 2, 2, 0, 7, 31, tzinfo=timezone.utc)
-    ) == buffer.datetime_to_index(datetime(2, 2, 2, 0, 10, tzinfo=timezone.utc))
+    ) == buffer.to_internal_index(datetime(2, 2, 2, 0, 10, tzinfo=timezone.utc))
     assert len(buffer.gaps) == 2
 
     # import pdb; pdb.set_trace()
     buffer.update(Sample(datetime(2, 2, 2, 0, 5, tzinfo=timezone.utc), Quantity(0)))
+    assert len(buffer.gaps) == 1
+
+
+def dt(i: int) -> datetime:  # pylint: disable=invalid-name
+    """Create a timestamp from the given index.
+
+    Args:
+        i: The index to create a timestamp from.
+
+    Returns:
+        The timestamp created from the index.
+    """
+    return datetime.fromtimestamp(i, tz=timezone.utc)
+
+
+def test_gaps() -> None:  # pylint: disable=too-many-statements
+    """Test gap treatment in ordered ring buffer."""
+    buffer = OrderedRingBuffer([0.0] * 5, ONE_SECOND)
+    assert buffer.oldest_timestamp is None
+    assert buffer.newest_timestamp is None
+    assert buffer.count_valid() == 0
+    assert buffer.count_covered() == 0
+    assert len(buffer.gaps) == 0
+
+    buffer.update(Sample(dt(0), Quantity(0)))
+    assert buffer.oldest_timestamp == dt(0)
+    assert buffer.newest_timestamp == dt(0)
+    assert buffer.count_valid() == 1
+    assert buffer.count_covered() == 1
+    assert len(buffer.gaps) == 1
+
+    buffer.update(Sample(dt(6), Quantity(0)))
+    assert buffer.oldest_timestamp == dt(6)
+    assert buffer.newest_timestamp == dt(6)
+    assert buffer.count_valid() == 1
+    assert buffer.count_covered() == 1
+    assert len(buffer.gaps) == 1
+
+    buffer.update(Sample(dt(2), Quantity(2)))
+    buffer.update(Sample(dt(3), Quantity(3)))
+    buffer.update(Sample(dt(4), Quantity(4)))
+    assert buffer.oldest_timestamp == dt(2)
+    assert buffer.newest_timestamp == dt(6)
+    assert buffer.count_valid() == 4
+    assert buffer.count_covered() == 5
+    assert len(buffer.gaps) == 1
+
+    buffer.update(Sample(dt(3), None))
+    assert buffer.oldest_timestamp == dt(2)
+    assert buffer.newest_timestamp == dt(6)
+    assert buffer.count_valid() == 3
+    assert buffer.count_covered() == 5
+    assert len(buffer.gaps) == 2
+
+    buffer.update(Sample(dt(3), Quantity(np.nan)))
+    assert buffer.oldest_timestamp == dt(2)
+    assert buffer.newest_timestamp == dt(6)
+    assert buffer.count_valid() == 3
+    assert buffer.count_covered() == 5
+    assert len(buffer.gaps) == 2
+
+    buffer.update(Sample(dt(2), Quantity(np.nan)))
+    assert buffer.oldest_timestamp == dt(4)
+    assert buffer.newest_timestamp == dt(6)
+    assert buffer.count_valid() == 2
+    assert buffer.count_covered() == 3
+    assert len(buffer.gaps) == 2
+
+    buffer.update(Sample(dt(3), Quantity(3)))
+    assert buffer.oldest_timestamp == dt(3)
+    assert buffer.newest_timestamp == dt(6)
+    assert buffer.count_valid() == 3
+    assert buffer.count_covered() == 4
+    assert len(buffer.gaps) == 2
+
+    buffer.update(Sample(dt(2), Quantity(2)))
+    assert buffer.oldest_timestamp == dt(2)
+    assert buffer.newest_timestamp == dt(6)
+    assert buffer.count_valid() == 4
+    assert buffer.count_covered() == 5
+    assert len(buffer.gaps) == 1
+
+    buffer.update(Sample(dt(5), Quantity(5)))
+    assert buffer.oldest_timestamp == dt(2)
+    assert buffer.newest_timestamp == dt(6)
+    assert buffer.count_valid() == 5
+    assert buffer.count_covered() == 5
+    assert len(buffer.gaps) == 0
+
+    # whole range gap suffers from sdk#646
+    buffer.update(Sample(dt(99), None))
+    assert buffer.oldest_timestamp == dt(95)  # bug: should be None
+    assert buffer.newest_timestamp == dt(99)  # bug: should be None
+    assert buffer.count_valid() == 4  # bug: should be 0 (whole range gap)
+    assert buffer.count_covered() == 5  # bug: should be 0
     assert len(buffer.gaps) == 1
 
 
@@ -286,7 +380,7 @@ def test_len_ringbuffer_samples_fit_buffer_size() -> None:
             timestamp = start_ts + timedelta(seconds=index)
             buffer.update(Sample(timestamp, Quantity(float(sample_value))))
 
-        assert len(buffer) == len(test_samples)
+        assert buffer.count_valid() == len(test_samples)
 
 
 def test_len_with_gaps() -> None:
@@ -301,7 +395,7 @@ def test_len_with_gaps() -> None:
         buffer.update(
             Sample(datetime(2, 2, 2, 0, 0, i, tzinfo=timezone.utc), Quantity(float(i)))
         )
-        assert len(buffer) == i + 1
+        assert buffer.count_valid() == i + 1
 
 
 def test_len_ringbuffer_samples_overwrite_buffer() -> None:
@@ -329,7 +423,7 @@ def test_len_ringbuffer_samples_overwrite_buffer() -> None:
             timestamp = start_ts + timedelta(seconds=index)
             buffer.update(Sample(timestamp, Quantity(float(sample_value))))
 
-        assert len(buffer) == half_buffer_size
+        assert buffer.count_valid() == half_buffer_size
 
 
 def test_ringbuffer_empty_buffer() -> None:
@@ -369,3 +463,239 @@ def test_off_by_one_gap_logic_bug() -> None:
 
     assert buffer.is_missing(times[0]) is False
     assert buffer.is_missing(times[1]) is False
+
+
+def test_cleanup_oldest_gap_timestamp() -> None:
+    """Test that gaps are updated such that they are fully contained in the buffer."""
+    buffer = OrderedRingBuffer(
+        np.empty(shape=15, dtype=float),
+        sampling_period=timedelta(seconds=1),
+        align_to=datetime(1, 1, 1, tzinfo=timezone.utc),
+    )
+
+    for i in range(10):
+        buffer.update(
+            Sample(datetime.fromtimestamp(200 + i, tz=timezone.utc), Quantity(i))
+        )
+
+    gap = Gap(
+        datetime.fromtimestamp(195, tz=timezone.utc),
+        datetime.fromtimestamp(200, tz=timezone.utc),
+    )
+
+    assert gap == buffer.gaps[0]
+
+
+def test_delete_oudated_gap() -> None:
+    """Test updating the buffer such that the gap is no longer valid.
+
+    We introduce two gaps and check that the oldest is removed.
+    """
+    buffer = OrderedRingBuffer(
+        np.empty(shape=3, dtype=float),
+        sampling_period=timedelta(seconds=1),
+        align_to=datetime(1, 1, 1, tzinfo=timezone.utc),
+    )
+
+    for i in range(2):
+        buffer.update(
+            Sample(datetime.fromtimestamp(200 + i, tz=timezone.utc), Quantity(i))
+        )
+    assert len(buffer.gaps) == 1
+
+    buffer.update(Sample(datetime.fromtimestamp(202, tz=timezone.utc), Quantity(2)))
+
+    assert len(buffer.gaps) == 0
+
+
+def get_orb(data: FloatArray) -> OrderedRingBuffer[FloatArray]:
+    """Get OrderedRingBuffer with data.
+
+    Args:
+        data: Data to fill the buffer with.
+
+    Returns:
+        OrderedRingBuffer with data.
+    """
+    buffer = OrderedRingBuffer(data, ONE_SECOND)
+    for i, d in enumerate(data):  # pylint: disable=invalid-name
+        buffer.update(Sample(dt(i), Quantity(d) if d is not None else None))
+    return buffer
+
+
+def test_window_datetime() -> None:
+    """Test the window function with datetime."""
+    buffer = get_orb(np.array([0, None, 2, 3, 4]))
+    win = buffer.window(dt(0), dt(3), force_copy=False, fill_value=None)
+    assert [0, np.nan, 2] == list(win)
+    buffer._buffer[1] = 1  # pylint: disable=protected-access
+    # Test whether the window is a view or a copy
+    assert [0, 1, 2] == list(win)
+    win = buffer.window(dt(0), dt(3), force_copy=False, fill_value=None)
+    assert [0, 1, 2] == list(win)
+    # Empty array
+    assert 0 == buffer.window(dt(1), dt(1)).size
+
+    buffer = get_orb([0.0, 1.0, 2.0, 3.0, 4.0])  # type: ignore
+    assert [0, 1, 2] == buffer.window(dt(0), dt(3))
+    assert [] == buffer.window(dt(0), dt(0))
+    assert [] == buffer.window(dt(1), dt(1))
+
+
+def test_window_index() -> None:
+    """Test the window function with index."""
+    buffer = get_orb([0.0, 1.0, 2.0, 3.0, 4.0])
+    assert [0, 1, 2] == buffer.window(0, 3)
+    assert [0, 1, 2, 3, 4] == buffer.window(0, 5)
+    assert [0, 1, 2, 3, 4] == buffer.window(0, 99)
+    assert [2, 3] == buffer.window(-3, -1)
+    assert [2, 3, 4] == buffer.window(-3, 5)
+    assert [0, 1, 2, 3] == buffer.window(-5, -1)
+    assert [0, 1, 2, 3, 4] == buffer.window(-99, None)
+    assert [0, 1, 2, 3, 4] == buffer.window(None, 99)
+    # start >= end
+    assert [] == buffer.window(0, 0)
+    assert [] == buffer.window(-5, 0)
+    assert [] == buffer.window(1, 0)
+    assert [] == buffer.window(-1, -2)
+    assert [] == buffer.window(-3, 0)
+
+
+def test_window_index_fill_value() -> None:
+    """Test fill_value functionality of window function."""
+    # Init with dummy data of size 3 and fill with [0, nan, 2]
+    buffer = OrderedRingBuffer([4711.0] * 3, ONE_SECOND)
+    buffer.update(Sample(dt(0), Quantity(0)))
+    buffer.update(Sample(dt(1), None))
+    buffer.update(Sample(dt(2), Quantity(2)))
+
+    # Test fill_value for explicitly set gaps
+    assert [0.0, np.nan, 2.0] == buffer.window(0, None)
+    assert [0.0, np.nan, 2.0] == buffer.window(0, None, fill_value=None)
+    assert [0.0, 1.0, 2.0] == buffer.window(0, None, fill_value=1)
+
+    # initial nan is ignored (optional implementation decision)
+    buffer.update(Sample(dt(3), Quantity(3)))  # -> [nan, 2, 3]
+    assert [2.0, 3.0] == buffer.window(0, None)
+    assert [2.0, 3.0] == buffer.window(0, None, fill_value=1)
+
+    # Test fill_value for gaps implicitly created gaps by time jumps
+    buffer.update(Sample(dt(4), Quantity(4)))
+    buffer.update(Sample(dt(6), Quantity(6)))  # -> [4, ?, 6]
+    # Default is fill missing values with NaNs
+    assert [4.0, np.nan, 6.0] == buffer.window(0, None)
+    assert [4.0, np.nan, 6.0] == buffer.window(0, None, fill_value=np.nan)
+    assert [4.0, 5.0, 6.0] == buffer.window(0, None, fill_value=5)
+    # If missing values not filled, outdated values can be returned unexpectedly
+    assert [4.0, 2, 6.0] == buffer.window(0, None, fill_value=None)
+
+    # Some edge cases
+    buffer.update(Sample(dt(7), Quantity(7)))  # -> [?, 6, 7]
+    assert [6.0, 7.0] == buffer.window(0, None)
+    buffer.update(Sample(dt(8), Quantity(np.nan)))  # -> [6, 7, nan]
+    assert [6.0, 7.0, np.nan] == buffer.window(0, None)
+    buffer.update(Sample(dt(9), None))  # -> [7, nan, nan]
+    assert [7.0, np.nan, np.nan] == buffer.window(0, None)
+
+
+def test_window_fail() -> None:
+    """Test the window function with invalid arguments."""
+    buffer = get_orb([0.0, 1.0, 2.0, 3.0, 4.0])
+    # Go crazy with the indices
+    with pytest.raises(IndexError):
+        buffer.window(dt(1), 3)
+    with pytest.raises(IndexError):
+        buffer.window(1, dt(3))
+    with pytest.raises(IndexError):
+        buffer.window(None, dt(2))
+    with pytest.raises(IndexError):
+        buffer.window(dt(2), None)
+    # Invalid argument combination
+    with pytest.raises(ValueError):
+        buffer.window(0, 1, force_copy=False, fill_value=0)
+
+
+def test_wrapped_buffer_window() -> None:
+    """Test the wrapped buffer window function."""
+    wbw = OrderedRingBuffer._wrapped_buffer_window  # pylint: disable=protected-access
+
+    #
+    # Tests for list buffer
+    #
+    buffer = [0.0, 1.0, 2.0, 3.0, 4.0]
+    # start = end
+    assert [0, 1, 2, 3, 4] == wbw(buffer, 0, 0, force_copy=False)
+    assert [4, 0, 1, 2, 3] == wbw(buffer, 4, 4, force_copy=False)
+    # start < end
+    assert [0] == wbw(buffer, 0, 1, force_copy=False)
+    assert [0, 1, 2, 3, 4] == wbw(buffer, 0, 5, force_copy=False)
+    # start > end, end = 0
+    assert [4] == wbw(buffer, 4, 0, force_copy=False)
+    # start > end, end > 0
+    assert [4, 0, 1] == wbw(buffer, 4, 2, force_copy=False)
+
+    # Lists are always shallow copies
+    res_copy = wbw(buffer, 0, 5, force_copy=False)
+    assert [0, 1, 2, 3, 4] == res_copy
+    buffer[0] = 9
+    assert [0, 1, 2, 3, 4] == res_copy
+
+    #
+    # Tests for array buffer
+    #
+    buffer = np.array([0, 1, 2, 3, 4])  # type: ignore
+    # start = end
+    assert [0, 1, 2, 3, 4] == list(wbw(buffer, 0, 0, force_copy=False))
+    assert [4, 0, 1, 2, 3] == list(wbw(buffer, 4, 4, force_copy=False))
+    # start < end
+    assert [0] == list(wbw(buffer, 0, 1, force_copy=False))
+    assert [0, 1, 2, 3, 4] == list(wbw(buffer, 0, 5, force_copy=False))
+    # start > end, end = 0
+    assert [4] == list(wbw(buffer, 4, 0, force_copy=False))
+    # start > end, end > 0
+    assert [4, 0, 1] == list(wbw(buffer, 4, 2, force_copy=False))
+
+    # Get a view and a copy before modifying the buffer
+    res1_view = wbw(buffer, 3, 5, force_copy=False)
+    res1_copy = wbw(buffer, 3, 5, force_copy=True)
+    res2_view = wbw(buffer, 3, 0, force_copy=False)
+    res2_copy = wbw(buffer, 3, 0, force_copy=True)
+    res3_copy = wbw(buffer, 4, 1, force_copy=False)
+    assert [3, 4] == list(res1_view)
+    assert [3, 4] == list(res1_copy)
+    assert [3, 4] == list(res2_view)
+    assert [3, 4] == list(res2_copy)
+    assert [4, 0] == list(res3_copy)
+
+    # Modify the buffer and check that only the view is updated
+    buffer[4] = 9
+    assert [3, 9] == list(res1_view)
+    assert [3, 4] == list(res1_copy)
+    assert [3, 9] == list(res2_view)
+    assert [3, 4] == list(res2_copy)
+    assert [4, 0] == list(res3_copy)
+
+
+def test_get_timestamp() -> None:
+    """Test the get_timestamp function."""
+    buffer = OrderedRingBuffer(
+        np.empty(shape=5, dtype=float),
+        sampling_period=timedelta(seconds=1),
+    )
+    for i in range(5):
+        buffer.update(Sample(dt(i), Quantity(i)))
+    assert dt(4) == buffer.get_timestamp(-1)
+    assert dt(0) == buffer.get_timestamp(-5)
+    assert dt(-1) == buffer.get_timestamp(-6)
+    assert dt(0) == buffer.get_timestamp(0)
+    assert dt(5) == buffer.get_timestamp(5)
+    assert dt(6) == buffer.get_timestamp(6)
+
+    for i in range(10, 15):
+        buffer.update(Sample(dt(i), Quantity(i)))
+    assert dt(14) == buffer.get_timestamp(-1)
+    assert dt(10) == buffer.get_timestamp(-5)
+    assert dt(9) == buffer.get_timestamp(-6)
+    assert dt(10) == buffer.get_timestamp(0)
+    assert dt(15) == buffer.get_timestamp(5)
+    assert dt(16) == buffer.get_timestamp(6)

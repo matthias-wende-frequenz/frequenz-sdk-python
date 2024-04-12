@@ -7,17 +7,19 @@ import asyncio
 import csv
 import random
 import timeit
+from collections.abc import Coroutine
 from datetime import timedelta
-from typing import Any, Coroutine, Dict, List, Set  # pylint: disable=unused-import
+from typing import Any
 
 from frequenz.channels import Broadcast
+from frequenz.client.microgrid import Component, ComponentCategory
 
 from frequenz.sdk import microgrid
-from frequenz.sdk.actor import ChannelRegistry, ResamplerConfig
+from frequenz.sdk.actor import ResamplerConfig
 from frequenz.sdk.actor.power_distributing import (
-    BatteryStatus,
+    ComponentPoolStatus,
     Error,
-    OutOfBound,
+    OutOfBounds,
     PartialFailure,
     PowerDistributingActor,
     Request,
@@ -25,18 +27,20 @@ from frequenz.sdk.actor.power_distributing import (
     Success,
 )
 from frequenz.sdk.microgrid import connection_manager
-from frequenz.sdk.microgrid.component import Component, ComponentCategory
 from frequenz.sdk.timeseries._quantities import Power
 
 HOST = "microgrid.sandbox.api.frequenz.io"
 PORT = 61060
 
 
-async def send_requests(batteries: Set[int], request_num: int) -> List[Result]:
+# TODO: this send_requests function uses the battery pool to # pylint: disable=fixme
+# send requests, and those no longer go directly to the power distributing actor, but
+# instead through the power managing actor.  So the below function needs to be updated
+# to use the PowerDistributingActor directly.
+async def send_requests(batteries: set[int], request_num: int) -> list[Result]:
     """Send requests to the PowerDistributingActor and wait for the response.
 
     Args:
-        user: user that should send request
         batteries: set of batteries where the power should be set
         request_num: number of requests that should be send
 
@@ -47,10 +51,12 @@ async def send_requests(batteries: Set[int], request_num: int) -> List[Result]:
         List of the results from the PowerDistributingActor.
     """
     battery_pool = microgrid.battery_pool(batteries)
-    results_rx = battery_pool.power_distribution_results()
-    result: List[Result] = []
+    results_rx = battery_pool.power_status.new_receiver()
+    result: list[Any] = []
     for _ in range(request_num):
-        await battery_pool.set_power(Power(float(random.randrange(100000, 1000000))))
+        await battery_pool.propose_power(
+            Power(float(random.randrange(100000, 1000000)))
+        )
         try:
             output = await asyncio.wait_for(results_rx.receive(), timeout=3)
             if output is None:
@@ -62,7 +68,7 @@ async def send_requests(batteries: Set[int], request_num: int) -> List[Result]:
     return result
 
 
-def parse_result(result: List[List[Result]]) -> Dict[str, float]:
+def parse_result(result: list[list[Result]]) -> dict[str, float]:
     """Parse result.
 
     Args:
@@ -75,7 +81,7 @@ def parse_result(result: List[List[Result]]) -> Dict[str, float]:
         Error: 0,
         Success: 0,
         PartialFailure: 0,
-        OutOfBound: 0,
+        OutOfBounds: 0,
     }
 
     for result_list in result:
@@ -86,14 +92,14 @@ def parse_result(result: List[List[Result]]) -> Dict[str, float]:
         "success_num": result_counts[Success],
         "failed_num": result_counts[PartialFailure],
         "error_num": result_counts[Error],
-        "out_of_bound": result_counts[OutOfBound],
+        "out_of_bounds": result_counts[OutOfBounds],
     }
 
 
 async def run_test(  # pylint: disable=too-many-locals
     num_requests: int,
-    batteries: Set[int],
-) -> Dict[str, Any]:
+    batteries: set[int],
+) -> dict[str, Any]:
     """Run test.
 
     Args:
@@ -105,22 +111,22 @@ async def run_test(  # pylint: disable=too-many-locals
     """
     start = timeit.default_timer()
 
-    power_request_channel = Broadcast[Request]("power-request")
-    battery_status_channel = Broadcast[BatteryStatus]("battery-status")
-    channel_registry = ChannelRegistry(name="power_distributor")
-    distributor = PowerDistributingActor(
-        channel_registry=channel_registry,
+    power_request_channel = Broadcast[Request](name="power-request")
+    battery_status_channel = Broadcast[ComponentPoolStatus](name="battery-status")
+    power_result_channel = Broadcast[Result](name="power-result")
+    async with PowerDistributingActor(
+        component_category=ComponentCategory.BATTERY,
+        component_type=None,
         requests_receiver=power_request_channel.new_receiver(),
-        battery_status_sender=battery_status_channel.new_sender(),
-    )
+        results_sender=power_result_channel.new_sender(),
+        component_pool_status_sender=battery_status_channel.new_sender(),
+        wait_for_data_sec=2.0,
+    ):
+        tasks: list[Coroutine[Any, Any, list[Result]]] = []
+        tasks.append(send_requests(batteries, num_requests))
 
-    tasks: List[Coroutine[Any, Any, List[Result]]] = []
-    tasks.append(send_requests(batteries, num_requests))
-
-    result = await asyncio.gather(*tasks)
-    exec_time = timeit.default_timer() - start
-
-    await distributor._stop()  # type: ignore # pylint: disable=no-member, protected-access
+        result = await asyncio.gather(*tasks)
+        exec_time = timeit.default_timer() - start
 
     summary = parse_result(result)
     summary["num_requests"] = num_requests
@@ -137,8 +143,8 @@ async def run() -> None:
         HOST, PORT, ResamplerConfig(resampling_period=timedelta(seconds=1.0))
     )
 
-    all_batteries: Set[Component] = connection_manager.get().component_graph.components(
-        component_category={ComponentCategory.BATTERY}
+    all_batteries: set[Component] = connection_manager.get().component_graph.components(
+        component_categories={ComponentCategory.BATTERY}
     )
     batteries_ids = {c.component_id for c in all_batteries}
     # Take some time to get data from components

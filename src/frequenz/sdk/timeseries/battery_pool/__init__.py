@@ -3,11 +3,12 @@
 
 """Manage a pool of batteries."""
 
-from ._result_types import Bound, PowerMetrics
-from .battery_pool import BatteryPool
+from ...actor._power_managing import _Report
+from ._battery_pool import BatteryPool
+from ._result_types import BatteryPoolReport
 
 __all__ = [
     "BatteryPool",
-    "PowerMetrics",
-    "Bound",
+    "BatteryPoolReport",
+    "_Report",
 ]

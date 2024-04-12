@@ -3,15 +3,16 @@
 
 """Read and update config variables."""
 
+import json
 import logging
-from typing import Any, Dict, Optional, TypeVar
+from typing import Any, TypeVar
 
-# pylint not finding parse_raw_as is a false positive
-from pydantic import ValidationError, parse_raw_as  # pylint: disable=no-name-in-module
+from pydantic import Strict, TypeAdapter, ValidationError
 
 _logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
+"""Type variable for validating configuration values."""
 
 
 class Config:
@@ -23,13 +24,13 @@ class Config:
     If new file is read, then previous configs will be forgotten.
     """
 
-    def __init__(self, conf_vars: Dict[str, Any]):
+    def __init__(self, conf_vars: dict[str, Any]):
         """Instantiate the config store and read config variables from the file.
 
         Args:
             conf_vars: Dict containing configuration variables
         """
-        self._conf_store: Dict[str, Any] = conf_vars
+        self._conf_store: dict[str, Any] = conf_vars
 
     def get(self, key: str, default: Any = None) -> Any:
         """Get the value for the specified key.
@@ -47,8 +48,8 @@ class Config:
         return self._conf_store.get(key, default)
 
     def get_dict(
-        self, key_prefix: str, expected_values_type: Optional[T]
-    ) -> Dict[str, Any]:
+        self, key_prefix: str, expected_values_type: T | None
+    ) -> dict[str, Any]:
         """Get a dictionary based on config key prefixes.
 
         For example, if key_prefix is "my_dict", then the following config store:
@@ -73,7 +74,7 @@ class Config:
             A dictionary containing the keys prefixed with `key_prefix` as keys
                 (but with the prefix removed) and the values as values.
         """
-        result: Dict[str, Any] = {}
+        result: dict[str, Any] = {}
         for key, value in self._conf_store.items():
             if key.startswith(key_prefix):
                 new_key = key[len(key_prefix) :]
@@ -120,7 +121,11 @@ class Config:
             return value
 
         try:
-            parsed_value: Any = parse_raw_as(expected_type, value)
+            obj = json.loads(value)
+            metadata = getattr(expected_type, "__metadata__", (None,))[0]
+            strict = metadata.strict if isinstance(metadata, Strict) else False
+            adapter = TypeAdapter(expected_type)
+            parsed_value = adapter.validate_python(obj, strict=strict)
         except (ValidationError, ValueError) as err:
             raise ValueError(
                 f"Could not convert config variable: {key} = '{value}' "

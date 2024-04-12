@@ -14,9 +14,10 @@ import asyncio
 import sys
 import tracemalloc
 from time import perf_counter
-from typing import Any, Tuple
+from typing import Any
 
 from frequenz.channels import Broadcast, Receiver, ReceiverStoppedError
+from frequenz.client.microgrid import ComponentMetricId
 
 from frequenz.sdk import microgrid
 from frequenz.sdk.actor import (
@@ -24,7 +25,6 @@ from frequenz.sdk.actor import (
     ComponentMetricRequest,
     DataSourcingActor,
 )
-from frequenz.sdk.microgrid.component import ComponentMetricId
 
 try:
     from tests.timeseries.mock_microgrid import MockMicrogrid
@@ -70,19 +70,20 @@ async def benchmark_data_sourcing(
         num_ev_chargers * len(COMPONENT_METRIC_IDS) * num_msgs_per_battery
     )
     mock_grid = MockMicrogrid(
-        grid_side_meter=False, num_values=num_msgs_per_battery, sample_rate_s=0.0
+        grid_meter=False, num_values=num_msgs_per_battery, sample_rate_s=0.0
     )
 
     mock_grid.add_ev_chargers(num_ev_chargers)
     mock_grid.start_mock_client(enable_mock_client)
 
     request_channel = Broadcast[ComponentMetricRequest](
-        "DataSourcingActor Request Channel"
+        name="DataSourcingActor Request Channel"
     )
 
     channel_registry = ChannelRegistry(name="Microgrid Channel Registry")
     request_receiver = request_channel.new_receiver(
-        "datasourcing-benchmark", maxsize=(num_ev_chargers * len(COMPONENT_METRIC_IDS))
+        name="datasourcing-benchmark",
+        limit=(num_ev_chargers * len(COMPONENT_METRIC_IDS)),
     )
     request_sender = request_channel.new_sender()
 
@@ -108,31 +109,32 @@ async def benchmark_data_sourcing(
                 "current_phase_requests", evc_id, component_metric_id, None
             )
 
-            recv_channel = channel_registry.new_receiver(request.get_channel_name())
+            recv_channel = channel_registry.get_or_create(
+                ComponentMetricRequest, request.get_channel_name()
+            ).new_receiver()
 
             await request_sender.send(request)
             consume_tasks.append(asyncio.create_task(consume(recv_channel)))
 
-    DataSourcingActor(request_receiver, channel_registry)
+    async with DataSourcingActor(request_receiver, channel_registry):
+        await asyncio.gather(*consume_tasks)
 
-    await asyncio.gather(*consume_tasks)
+        time_taken = perf_counter() - start_time
 
-    time_taken = perf_counter() - start_time
+        await mock_grid.cleanup()
 
-    await mock_grid.cleanup()
-
-    print(f"Samples Sent: {samples_sent}, time taken: {time_taken}")
-    print(f"Samples per second: {samples_sent / time_taken}")
-    print(
-        "Expected samples: "
-        f"{num_expected_messages}, missing: {num_expected_messages - samples_sent}"
-    )
-    print(
-        f"Missing per EVC: {(num_expected_messages - samples_sent) / num_ev_chargers}"
-    )
+        print(f"Samples Sent: {samples_sent}, time taken: {time_taken}")
+        print(f"Samples per second: {samples_sent / time_taken}")
+        print(
+            "Expected samples: "
+            f"{num_expected_messages}, missing: {num_expected_messages - samples_sent}"
+        )
+        print(
+            f"Missing per EVC: {(num_expected_messages - samples_sent) / num_ev_chargers}"
+        )
 
 
-def parse_args() -> Tuple[int, int, bool]:
+def parse_args() -> tuple[int, int, bool]:
     """Parse the command line arguments.
 
     Returns:

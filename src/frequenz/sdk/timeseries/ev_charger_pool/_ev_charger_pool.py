@@ -3,100 +3,132 @@
 
 """Interactions with pools of EV Chargers."""
 
-from __future__ import annotations
 
 import asyncio
-import logging
+import typing
 import uuid
-from asyncio import Task
 from collections import abc
-from dataclasses import dataclass
 from datetime import timedelta
 
-from frequenz.channels import Broadcast, ChannelClosedError, Receiver, Sender
-
-from ..._internal._asyncio import cancel_and_await
-from ...actor import ChannelRegistry, ComponentMetricRequest
-from ...microgrid import connection_manager
-from ...microgrid.component import ComponentCategory, ComponentMetricId
-from .. import Sample, Sample3Phase
-from .._formula_engine import FormulaEngine, FormulaEngine3Phase, FormulaEnginePool
-from .._formula_engine._formula_generators import (
+from ..._internal._channels import ReceiverFetcher
+from ...actor import _power_managing
+from ...timeseries import Bounds
+from .._base_types import SystemBounds
+from .._quantities import Current, Power
+from ..formula_engine import FormulaEngine, FormulaEngine3Phase
+from ..formula_engine._formula_generators import (
     EVChargerCurrentFormula,
     EVChargerPowerFormula,
     FormulaGeneratorConfig,
-    FormulaType,
 )
-from .._quantities import Current, Power, Quantity
-from ._set_current_bounds import BoundsSetter, ComponentCurrentLimit
-from ._state_tracker import EVChargerState, StateTracker
-
-_logger = logging.getLogger(__name__)
+from ._ev_charger_pool_reference_store import EVChargerPoolReferenceStore
+from ._result_types import EVChargerPoolReport
 
 
 class EVChargerPoolError(Exception):
     """An error that occurred in any of the EVChargerPool methods."""
 
 
-@dataclass(frozen=True)
-class EVChargerData:
-    """Data for an EV Charger, including the 3-phase current and the component state."""
-
-    component_id: int
-    current: Sample3Phase[Current]
-    state: EVChargerState
-
-
 class EVChargerPool:
-    """Interactions with EV Chargers."""
+    """An interface for interaction with pools of EV Chargers.
 
-    def __init__(
+    Provides:
+      - Aggregate [`power`][frequenz.sdk.timeseries.ev_charger_pool.EVChargerPool.power]
+        and 3-phase
+        [`current`][frequenz.sdk.timeseries.ev_charger_pool.EVChargerPool.current]
+        measurements of the EV Chargers in the pool.
+    """
+
+    def __init__(  # pylint: disable=too-many-arguments
         self,
-        channel_registry: ChannelRegistry,
-        resampler_subscription_sender: Sender[ComponentMetricRequest],
-        component_ids: set[int] | None = None,
-        repeat_interval: timedelta = timedelta(seconds=3.0),
+        ev_charger_pool_ref: EVChargerPoolReferenceStore,
+        name: str | None,
+        priority: int,
     ) -> None:
         """Create an `EVChargerPool` instance.
 
+        !!! note
+            `EVChargerPool` instances are not meant to be created directly by users. Use
+            the [`microgrid.ev_charger_pool`][frequenz.sdk.microgrid.ev_charger_pool]
+            method for creating `EVChargerPool` instances.
+
         Args:
-            channel_registry: A channel registry instance shared with the resampling
-                actor.
-            resampler_subscription_sender: A sender for sending metric requests to the
-                resampling actor.
-            component_ids: An optional list of component_ids belonging to this pool.  If
-                not specified, IDs of all EV Chargers in the microgrid will be fetched
-                from the component graph.
-            repeat_interval: Interval after which to repeat the last set bounds to the
-                microgrid API, if no new calls to `set_bounds` have been made.
+            ev_charger_pool_ref: The EV charger pool reference store instance.
+            name: An optional name used to identify this instance of the pool or a
+                corresponding actor in the logs.
+            priority: The priority of the actor using this wrapper.
         """
-        self._channel_registry: ChannelRegistry = channel_registry
-        self._repeat_interval = repeat_interval
-        self._resampler_subscription_sender: Sender[
-            ComponentMetricRequest
-        ] = resampler_subscription_sender
-        self._component_ids: set[int] = set()
-        if component_ids is not None:
-            self._component_ids = component_ids
-        else:
-            graph = connection_manager.get().component_graph
-            self._component_ids = {
-                evc.component_id
-                for evc in graph.components(
-                    component_category={ComponentCategory.EV_CHARGER}
-                )
-            }
-        self._state_tracker: StateTracker | None = None
-        self._status_streams: dict[
-            int, tuple[Task[None], Broadcast[EVChargerData]]
-        ] = {}
-        self._namespace: str = f"ev-charger-pool-{uuid.uuid4()}"
-        self._formula_pool: FormulaEnginePool = FormulaEnginePool(
-            self._namespace,
-            self._channel_registry,
-            self._resampler_subscription_sender,
+        self._ev_charger_pool = ev_charger_pool_ref
+        unique_id = str(uuid.uuid4())
+        self._source_id = unique_id if name is None else f"{name}-{unique_id}"
+        self._priority = priority
+
+    async def propose_power(
+        self,
+        power: Power | None,
+        *,
+        request_timeout: timedelta = timedelta(seconds=5.0),
+        bounds: Bounds[Power | None] = Bounds(None, None),
+    ) -> None:
+        """Send a proposal to the power manager for the pool's set of EV chargers.
+
+        This proposal is for the maximum power that can be set for the EV chargers in
+        the pool.  The actual consumption might be lower based on the number of phases
+        an EV is drawing power from, and its current state of charge.
+
+        Power values need to follow the Passive Sign Convention (PSC). That is, positive
+        values indicate charge power and negative values indicate discharge power.
+        Discharging from EV chargers is currently not supported.
+
+        If the same EV chargers are shared by multiple actors, the power manager will
+        consider the priority of the actors, the bounds they set, and their preferred
+        power, when calculating the target power for the EV chargers
+
+        The preferred power of lower priority actors will take precedence as long as
+        they respect the bounds set by higher priority actors.  If lower priority actors
+        request power values outside of the bounds set by higher priority actors, the
+        target power will be the closest value to the preferred power that is within the
+        bounds.
+
+        When there are no other actors trying to use the same EV chargers, the actor's
+        preferred power would be set as the target power, as long as it falls within the
+        system power bounds for the EV chargers.
+
+        The result of the request can be accessed using the receiver returned from the
+        [`power_status`][frequenz.sdk.timeseries.ev_charger_pool.EVChargerPool.power_status]
+        method, which also streams the bounds that an actor should comply with, based on
+        its priority.
+
+        Args:
+            power: The power to propose for the EV chargers in the pool.  If `None`,
+                this proposal will not have any effect on the target power, unless
+                bounds are specified.  If both are `None`, it is equivalent to not
+                having a proposal or withdrawing a previous one.
+            request_timeout: The timeout for the request.
+            bounds: The power bounds for the proposal.  These bounds will apply to
+                actors with a lower priority, and can be overridden by bounds from
+                actors with a higher priority.  If None, the power bounds will be set to
+                the maximum power of the batteries in the pool.  This is currently and
+                experimental feature.
+
+        Raises:
+            EVChargerPoolError: If a discharge power for EV chargers is requested.
+        """
+        if power is not None and power < Power.zero():
+            raise EVChargerPoolError(
+                "Discharging from EV chargers is currently not supported."
+            )
+        await self._ev_charger_pool.power_manager_requests_sender.send(
+            _power_managing.Proposal(
+                source_id=self._source_id,
+                preferred_power=power,
+                bounds=bounds,
+                component_ids=self._ev_charger_pool.component_ids,
+                priority=self._priority,
+                creation_time=asyncio.get_running_loop().time(),
+                request_timeout=request_timeout,
+            )
         )
-        self._bounds_setter: BoundsSetter | None = None
 
     @property
     def component_ids(self) -> abc.Set[int]:
@@ -105,7 +137,7 @@ class EVChargerPool:
         Returns:
             Set of managed component IDs.
         """
-        return self._component_ids
+        return self._ev_charger_pool.component_ids
 
     @property
     def current(self) -> FormulaEngine3Phase[Current]:
@@ -123,10 +155,14 @@ class EVChargerPool:
             A FormulaEngine that will calculate and stream the total current of all EV
                 Chargers.
         """
-        engine = self._formula_pool.from_3_phase_current_formula_generator(
-            "ev_charger_total_current",
-            EVChargerCurrentFormula,
-            FormulaGeneratorConfig(component_ids=self._component_ids),
+        engine = (
+            self._ev_charger_pool.formula_pool.from_3_phase_current_formula_generator(
+                "ev_charger_total_current",
+                EVChargerCurrentFormula,
+                FormulaGeneratorConfig(
+                    component_ids=self._ev_charger_pool.component_ids
+                ),
+            )
         )
         assert isinstance(engine, FormulaEngine3Phase)
         return engine
@@ -147,230 +183,53 @@ class EVChargerPool:
             A FormulaEngine that will calculate and stream the total power of all EV
                 Chargers.
         """
-        engine = self._formula_pool.from_power_formula_generator(
+        engine = self._ev_charger_pool.formula_pool.from_power_formula_generator(
             "ev_charger_power",
             EVChargerPowerFormula,
             FormulaGeneratorConfig(
-                component_ids=self._component_ids,
-                formula_type=FormulaType.PASSIVE_SIGN_CONVENTION,
+                component_ids=self._ev_charger_pool.component_ids,
             ),
         )
         assert isinstance(engine, FormulaEngine)
         return engine
 
     @property
-    def production_power(self) -> FormulaEngine[Power]:
-        """Fetch the total power produced by the EV Chargers in the pool.
+    def power_status(self) -> ReceiverFetcher[EVChargerPoolReport]:
+        """Get a receiver to receive new power status reports when they change.
 
-        This formula produces positive values when producing power and 0 otherwise.
-
-        If a formula engine to calculate EV Charger power is not already running, it
-        will be started.
-
-        A receiver from the formula engine can be created using the `new_receiver`
-        method.
+        These include
+          - the current inclusion/exclusion bounds available for the pool's priority,
+          - the current target power for the pool's set of batteries,
+          - the result of the last distribution request for the pool's set of batteries.
 
         Returns:
-            A FormulaEngine that will calculate and stream the production power of all
-                EV Chargers.
+            A receiver that will stream power status reports for the pool's priority.
         """
-        engine = self._formula_pool.from_power_formula_generator(
-            "ev_charger_production_power",
-            EVChargerPowerFormula,
-            FormulaGeneratorConfig(
-                component_ids=self._component_ids,
-                formula_type=FormulaType.PRODUCTION,
-            ),
+        sub = _power_managing.ReportRequest(
+            source_id=self._source_id,
+            priority=self._priority,
+            component_ids=self._ev_charger_pool.component_ids,
         )
-        assert isinstance(engine, FormulaEngine)
-        return engine
-
-    @property
-    def consumption_power(self) -> FormulaEngine[Power]:
-        """Fetch the total power consumed by the EV Chargers in the pool.
-
-        This formula produces positive values when consuming power and 0 otherwise.
-
-        If a formula engine to calculate EV Charger power is not already running, it
-        will be started.
-
-        A receiver from the formula engine can be created using the `new_receiver`
-        method.
-
-        Returns:
-            A FormulaEngine that will calculate and stream the consumption power of all
-                EV Chargers.
-        """
-        engine = self._formula_pool.from_power_formula_generator(
-            "ev_charger_consumption_power",
-            EVChargerPowerFormula,
-            FormulaGeneratorConfig(
-                component_ids=self._component_ids,
-                formula_type=FormulaType.CONSUMPTION,
-            ),
-        )
-        assert isinstance(engine, FormulaEngine)
-        return engine
-
-    def component_data(self, component_id: int) -> Receiver[EVChargerData]:
-        """Stream 3-phase current values and state of an EV Charger.
-
-        Args:
-            component_id: id of the EV Charger for which data is requested.
-
-        Returns:
-            A receiver that streams objects containing 3-phase current and state of
-                an EV Charger.
-        """
-        if recv := self._status_streams.get(component_id, None):
-            task, output_chan = recv
-            if not task.done():
-                return output_chan.new_receiver()
-            _logger.warning("Restarting component_status for id: %s", component_id)
-        else:
-            output_chan = Broadcast[EVChargerData](
-                f"evpool-component_status-{component_id}"
+        self._ev_charger_pool.power_bounds_subs[sub.get_channel_name()] = (
+            asyncio.create_task(
+                self._ev_charger_pool.power_manager_bounds_subs_sender.send(sub)
             )
-
-        task = asyncio.create_task(
-            self._stream_component_data(component_id, output_chan.new_sender())
         )
+        channel = self._ev_charger_pool.channel_registry.get_or_create(
+            _power_managing._Report,  # pylint: disable=protected-access
+            sub.get_channel_name(),
+        )
+        channel.resend_latest = True
 
-        self._status_streams[component_id] = (task, output_chan)
-
-        return output_chan.new_receiver()
-
-    async def set_bounds(self, component_id: int, max_amps: float) -> None:
-        """Send given max current bound for the given EV Charger to the microgrid API.
-
-        Bounds are used to limit the max current drawn by an EV, although the exact
-        value will be determined by the EV.
-
-        Args:
-            component_id: ID of EV Charger to set the current bounds to.
-            max_amps: maximum current in amps, that an EV can draw from this EV Charger.
-        """
-        if not self._bounds_setter:
-            self._bounds_setter = BoundsSetter(self._repeat_interval)
-        await self._bounds_setter.set(component_id, max_amps)
-
-    def new_bounds_sender(self) -> Sender[ComponentCurrentLimit]:
-        """Return a `Sender` for setting EV Charger current bounds with.
-
-        Bounds are used to limit the max current drawn by an EV, although the exact
-        value will be determined by the EV.
-
-        Returns:
-            A new `Sender`.
-        """
-        if not self._bounds_setter:
-            self._bounds_setter = BoundsSetter(self._repeat_interval)
-        return self._bounds_setter.new_bounds_sender()
+        # More details on why the cast is needed here:
+        # https://github.com/frequenz-floss/frequenz-sdk-python/issues/823
+        return typing.cast(ReceiverFetcher[EVChargerPoolReport], channel)
 
     async def stop(self) -> None:
         """Stop all tasks and channels owned by the EVChargerPool."""
-        if self._bounds_setter:
-            await self._bounds_setter.stop()
-        if self._state_tracker:
-            await self._state_tracker.stop()
-        await self._formula_pool.stop()
-        for stream in self._status_streams.values():
-            task, chan = stream
-            await chan.close()
-            await cancel_and_await(task)
+        await self._ev_charger_pool.stop()
 
-    async def _get_current_streams(
-        self, component_id: int
-    ) -> tuple[
-        Receiver[Sample[Quantity]],
-        Receiver[Sample[Quantity]],
-        Receiver[Sample[Quantity]],
-    ]:
-        """Fetch current streams from the resampler for each phase.
-
-        Args:
-            component_id: id of EV Charger for which current streams are being fetched.
-
-        Returns:
-            A tuple of 3 receivers stream resampled current values for the given
-                component id, one for each phase.
-        """
-
-        async def resampler_subscribe(
-            metric_id: ComponentMetricId,
-        ) -> Receiver[Sample[Quantity]]:
-            request = ComponentMetricRequest(
-                namespace="ev-pool",
-                component_id=component_id,
-                metric_id=metric_id,
-                start_time=None,
-            )
-            await self._resampler_subscription_sender.send(request)
-            return self._channel_registry.new_receiver(request.get_channel_name())
-
-        return (
-            await resampler_subscribe(ComponentMetricId.CURRENT_PHASE_1),
-            await resampler_subscribe(ComponentMetricId.CURRENT_PHASE_2),
-            await resampler_subscribe(ComponentMetricId.CURRENT_PHASE_3),
-        )
-
-    async def _stream_component_data(
-        self,
-        component_id: int,
-        sender: Sender[EVChargerData],
-    ) -> None:
-        """Stream 3-phase current values and state of an EV Charger.
-
-        Args:
-            component_id: id of the EV Charger for which data is requested.
-            sender: A sender to stream EV Charger data to.
-
-        Raises:
-            ChannelClosedError: If the channels from the resampler are closed.
-        """
-        if not self._state_tracker:
-            self._state_tracker = StateTracker(self._component_ids)
-
-        (phase_1_rx, phase_2_rx, phase_3_rx) = await self._get_current_streams(
-            component_id
-        )
-        while True:
-            try:
-                (phase_1, phase_2, phase_3) = (
-                    await phase_1_rx.receive(),
-                    await phase_2_rx.receive(),
-                    await phase_3_rx.receive(),
-                )
-            except ChannelClosedError:
-                _logger.exception("Streams closed for component_id=%s.", component_id)
-                raise
-
-            sample = Sample3Phase(
-                timestamp=phase_1.timestamp,
-                value_p1=None
-                if phase_1.value is None
-                else Current.from_amperes(phase_1.value.base_value),
-                value_p2=None
-                if phase_2.value is None
-                else Current.from_amperes(phase_2.value.base_value),
-                value_p3=None
-                if phase_3.value is None
-                else Current.from_amperes(phase_3.value.base_value),
-            )
-
-            if (
-                phase_1.value is None
-                and phase_2.value is None
-                and phase_3.value is None
-            ):
-                state = EVChargerState.MISSING
-            else:
-                state = self._state_tracker.get(component_id)
-
-            await sender.send(
-                EVChargerData(
-                    component_id=component_id,
-                    current=sample,
-                    state=state,
-                )
-            )
+    @property
+    def _system_power_bounds(self) -> ReceiverFetcher[SystemBounds]:
+        """Return a receiver fetcher for the system power bounds."""
+        return self._ev_charger_pool.bounds_channel

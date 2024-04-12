@@ -11,27 +11,32 @@ all framework code, as API integration should be highly encapsulated.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Iterable, Iterator
 
 # pylint: disable=invalid-name,no-name-in-module,unused-import
 from concurrent import futures
-from typing import Iterable, Iterator, List, Optional, Tuple
 
 import grpc
-from frequenz.api.microgrid.battery_pb2 import Battery
-from frequenz.api.microgrid.battery_pb2 import Data as BatteryData
-from frequenz.api.microgrid.common_pb2 import AC, Metric, MetricAggregation
-from frequenz.api.microgrid.ev_charger_pb2 import EVCharger
-from frequenz.api.microgrid.inverter_pb2 import Inverter
-from frequenz.api.microgrid.inverter_pb2 import Type as InverterType
-from frequenz.api.microgrid.meter_pb2 import Data as MeterData
-from frequenz.api.microgrid.meter_pb2 import Meter
-from frequenz.api.microgrid.microgrid_pb2 import (
+from frequenz.api.common.components_pb2 import (
     COMPONENT_CATEGORY_BATTERY,
     COMPONENT_CATEGORY_EV_CHARGER,
     COMPONENT_CATEGORY_INVERTER,
     COMPONENT_CATEGORY_METER,
-    Component,
     ComponentCategory,
+    InverterType,
+)
+from frequenz.api.common.metrics.electrical_pb2 import AC
+from frequenz.api.common.metrics_pb2 import Metric, MetricAggregation
+from frequenz.api.microgrid.battery_pb2 import Battery
+from frequenz.api.microgrid.battery_pb2 import Data as BatteryData
+from frequenz.api.microgrid.ev_charger_pb2 import EvCharger
+from frequenz.api.microgrid.grid_pb2 import Metadata as GridMetadata
+from frequenz.api.microgrid.inverter_pb2 import Inverter
+from frequenz.api.microgrid.inverter_pb2 import Metadata as InverterMetadata
+from frequenz.api.microgrid.meter_pb2 import Data as MeterData
+from frequenz.api.microgrid.meter_pb2 import Meter
+from frequenz.api.microgrid.microgrid_pb2 import (
+    Component,
     ComponentData,
     ComponentFilter,
     ComponentIdParam,
@@ -39,8 +44,10 @@ from frequenz.api.microgrid.microgrid_pb2 import (
     Connection,
     ConnectionFilter,
     ConnectionList,
-    PowerLevelParam,
+    MicrogridMetadata,
     SetBoundsParam,
+    SetPowerActiveParam,
+    SetPowerReactiveParam,
 )
 from frequenz.api.microgrid.microgrid_pb2_grpc import (
     MicrogridServicer,
@@ -49,6 +56,8 @@ from frequenz.api.microgrid.microgrid_pb2_grpc import (
 from google.protobuf.empty_pb2 import Empty
 from google.protobuf.timestamp_pb2 import Timestamp
 from google.protobuf.wrappers_pb2 import BoolValue
+
+from frequenz.sdk.timeseries import Current
 
 
 class MockMicrogridServicer(  # pylint: disable=too-many-public-methods
@@ -63,33 +72,46 @@ class MockMicrogridServicer(  # pylint: disable=too-many-public-methods
 
     def __init__(
         self,
-        components: Optional[List[Tuple[int, ComponentCategory.V]]] = None,
-        connections: Optional[List[Tuple[int, int]]] = None,
+        components: list[tuple[int, ComponentCategory.V]] | None = None,
+        connections: list[tuple[int, int]] | None = None,
     ) -> None:
         """Create a MockMicrogridServicer instance."""
-        self._components: List[Component] = []
-        self._connections: List[Connection] = []
-        self._bounds: List[SetBoundsParam] = []
+        self._components: list[Component] = []
+        self._connections: list[Connection] = []
+        self._bounds: list[SetBoundsParam] = []
 
         if components is not None:
             self.set_components(components)
         if connections is not None:
             self.set_connections(connections)
 
-        self._latest_charge: Optional[PowerLevelParam] = None
-        self._latest_discharge: Optional[PowerLevelParam] = None
+        self._latest_power: SetPowerActiveParam | None = None
 
     def add_component(
         self,
         component_id: int,
         component_category: ComponentCategory.V,
-        inverter_type: InverterType.V = InverterType.TYPE_UNSPECIFIED,
+        max_current: Current | None = None,
+        inverter_type: InverterType.V = InverterType.INVERTER_TYPE_UNSPECIFIED,
     ) -> None:
         """Add a component to the mock service."""
         if component_category == ComponentCategory.COMPONENT_CATEGORY_INVERTER:
             self._components.append(
                 Component(
-                    id=component_id, category=component_category, inverter=inverter_type
+                    id=component_id,
+                    category=component_category,
+                    inverter=InverterMetadata(type=inverter_type),
+                )
+            )
+        elif (
+            component_category == ComponentCategory.COMPONENT_CATEGORY_GRID
+            and max_current is not None
+        ):
+            self._components.append(
+                Component(
+                    id=component_id,
+                    category=component_category,
+                    grid=GridMetadata(rated_fuse_current=int(max_current.as_amperes())),
                 )
             )
         else:
@@ -101,14 +123,14 @@ class MockMicrogridServicer(  # pylint: disable=too-many-public-methods
         """Add a connection to the mock service."""
         self._connections.append(Connection(start=start, end=end))
 
-    def set_components(self, components: List[Tuple[int, ComponentCategory.V]]) -> None:
+    def set_components(self, components: list[tuple[int, ComponentCategory.V]]) -> None:
         """Set components to mock service, dropping existing."""
         self._components.clear()
         self._components.extend(
             map(lambda c: Component(id=c[0], category=c[1]), components)
         )
 
-    def set_connections(self, connections: List[Tuple[int, int]]) -> None:
+    def set_connections(self, connections: list[tuple[int, int]]) -> None:
         """Set connections to mock service, dropping existing."""
         self._connections.clear()
         self._connections.extend(
@@ -116,16 +138,11 @@ class MockMicrogridServicer(  # pylint: disable=too-many-public-methods
         )
 
     @property
-    def latest_charge(self) -> Optional[PowerLevelParam]:
+    def latest_power(self) -> SetPowerActiveParam | None:
         """Get argumetns of the latest charge request."""
-        return self._latest_charge
+        return self._latest_power
 
-    @property
-    def latest_discharge(self) -> Optional[PowerLevelParam]:
-        """Get arguments of the latest discharge request."""
-        return self._latest_discharge
-
-    def get_bounds(self) -> List[SetBoundsParam]:
+    def get_bounds(self) -> list[SetBoundsParam]:
         """Return the list of received bounds."""
         return self._bounds
 
@@ -159,7 +176,7 @@ class MockMicrogridServicer(  # pylint: disable=too-many-public-methods
             connections = filter(lambda c: c.end in request.ends, connections)
         return ConnectionList(connections=connections)
 
-    def GetComponentData(
+    def StreamComponentData(
         self, request: ComponentIdParam, context: grpc.ServicerContext
     ) -> Iterator[ComponentData]:
         """Return an iterator for mock ComponentData."""
@@ -194,7 +211,7 @@ class MockMicrogridServicer(  # pylint: disable=too-many-public-methods
             if component.category == COMPONENT_CATEGORY_INVERTER:
                 return ComponentData(id=request.id, inverter=Inverter())
             if component.category == COMPONENT_CATEGORY_EV_CHARGER:
-                return ComponentData(id=request.id, ev_charger=EVCharger())
+                return ComponentData(id=request.id, ev_charger=EvCharger())
             return ComponentData()
 
         num_messages = 3
@@ -202,56 +219,68 @@ class MockMicrogridServicer(  # pylint: disable=too-many-public-methods
             msg = next_msg()
             yield msg
 
-    def SetBounds(
-        self, request_iterator: Iterator[SetBoundsParam], context: grpc.ServicerContext
+    def SetPowerActive(
+        self, request: SetPowerActiveParam, context: grpc.ServicerContext
     ) -> Empty:
-        """/nitrogen.Nitrogen/SetBounds method stub."""
-        for bound in request_iterator:
-            self._bounds.append(bound)
+        """Microgrid service SetPowerActive method stub."""
+        self._latest_power = request
         return Empty()
 
-    def Charge(self, request: PowerLevelParam, context: grpc.ServicerContext) -> Empty:
-        """/nitrogen.Nitrogen/Charge method stub."""
-        self._latest_charge = request
+    def SetPowerReactive(
+        self, request: SetPowerReactiveParam, context: grpc.ServicerContext
+    ) -> Empty:
+        """Microgrid service SetPowerReactive method stub."""
         return Empty()
 
-    def Discharge(
-        self, request: PowerLevelParam, context: grpc.ServicerContext
-    ) -> Empty:
-        """/nitrogen.Nitrogen/Discharge method stub."""
-        self._latest_discharge = request
-        return Empty()
+    def GetMicrogridMetadata(
+        self, request: Empty, context: grpc.ServicerContext
+    ) -> MicrogridMetadata:
+        """Microgrid service GetMicrogridMetadata method stub."""
+        return MicrogridMetadata()
 
     def CanStreamData(
         self, request: ComponentIdParam, context: grpc.ServicerContext
     ) -> BoolValue:
-        """/nitrogen.Nitrogen/CanStreamData method stub."""
+        """Microgrid service CanStreamData method stub."""
         return BoolValue(value=True)
+
+    def AddExclusionBounds(
+        self, request: SetBoundsParam, context: grpc.ServicerContext
+    ) -> Timestamp:
+        """Microgrid service AddExclusionBounds method stub."""
+        return Timestamp()
+
+    def AddInclusionBounds(
+        self, request: SetBoundsParam, context: grpc.ServicerContext
+    ) -> Timestamp:
+        """Microgrid service AddExclusionBounds method stub."""
+        self._bounds.append(request)
+        return Timestamp()
 
     def HotStandby(
         self, request: ComponentIdParam, context: grpc.ServicerContext
     ) -> Empty:
-        """/nitrogen.Nitrogen/HotStandby method stub."""
+        """Microgrid service HotStandby method stub."""
         return Empty()
 
     def ColdStandby(
         self, request: ComponentIdParam, context: grpc.ServicerContext
     ) -> Empty:
-        """/nitrogen.Nitrogen/ColdStandby method stub."""
+        """Microgrid service ColdStandby method stub."""
         return Empty()
 
     def ErrorAck(
         self, request: ComponentIdParam, context: grpc.ServicerContext
     ) -> Empty:
-        """/nitrogen.Nitrogen/ErrorAck method stub."""
+        """Microgrid service ErrorAck method stub."""
         return Empty()
 
     def Start(self, request: ComponentIdParam, context: grpc.ServicerContext) -> Empty:
-        """/nitrogen.Nitrogen/Start method stub."""
+        """Microgrid service Start method stub."""
         return Empty()
 
     def Stop(self, request: ComponentIdParam, context: grpc.ServicerContext) -> Empty:
-        """/nitrogen.Nitrogen/Stop method stub."""
+        """Microgrid service Stop method stub."""
         return Empty()
 
 
@@ -270,11 +299,11 @@ class MockGrpcServer:
         """Start the server."""
         await self._server.start()
 
-    async def _stop(self, grace: Optional[float]) -> None:
+    async def _stop(self, grace: float | None) -> None:
         """Stop the server."""
         await self._server.stop(grace)
 
-    async def _wait_for_termination(self, timeout: Optional[float] = None) -> None:
+    async def _wait_for_termination(self, timeout: float | None = None) -> None:
         """Wait for termination."""
         await self._server.wait_for_termination(timeout)
 

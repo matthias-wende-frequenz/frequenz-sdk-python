@@ -6,7 +6,7 @@
 import random
 import timeit
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, TypeVar
+from typing import Any, TypeVar
 
 import numpy as np
 
@@ -39,8 +39,7 @@ def test_days(days: int, buffer: OrderedRingBuffer[Any]) -> None:
     basetime = datetime(2022, 1, 1, tzinfo=timezone.utc)
 
     for day in range(days):
-        # pylint: disable=unused-variable
-        minutes = buffer.window(
+        _ = buffer.window(
             basetime + timedelta(days=day), basetime + timedelta(days=day + 1)
         )
 
@@ -67,7 +66,7 @@ def test_slices(days: int, buffer: OrderedRingBuffer[Any], median: bool) -> None
                 total += float(np.average(minutes))
 
 
-def test_29_days_list(num_runs: int) -> Dict[str, float]:
+def test_29_days_list(num_runs: int) -> dict[str, float]:
     """Run the 29 day test on the list backend."""
     days = 29
     buffer = OrderedRingBuffer([0.0] * MINUTES_IN_29_DAYS, timedelta(minutes=1))
@@ -77,7 +76,7 @@ def test_29_days_list(num_runs: int) -> Dict[str, float]:
     return {"fill": fill_time, "test": test_time}
 
 
-def test_29_days_array(num_runs: int) -> Dict[str, float]:
+def test_29_days_array(num_runs: int) -> dict[str, float]:
     """Run the 29 day test on the array backend."""
     days = 29
     buffer = OrderedRingBuffer(
@@ -92,7 +91,7 @@ def test_29_days_array(num_runs: int) -> Dict[str, float]:
     return {"fill": fill_time, "test": test_time}
 
 
-def test_29_days_slicing_list(num_runs: int) -> Dict[str, float]:
+def test_29_days_slicing_list(num_runs: int) -> dict[str, float]:
     """Run slicing tests on list backend."""
     days = 29
     buffer = OrderedRingBuffer([0.0] * MINUTES_IN_29_DAYS, timedelta(minutes=1))
@@ -108,7 +107,7 @@ def test_29_days_slicing_list(num_runs: int) -> Dict[str, float]:
     return {"fill": fill_time, "median": median_test_time, "avg": avg_test_time}
 
 
-def test_29_days_slicing_array(num_runs: int) -> Dict[str, float]:
+def test_29_days_slicing_array(num_runs: int) -> dict[str, float]:
     """Run slicing tests on array backend."""
     days = 29
     buffer = OrderedRingBuffer(
@@ -175,14 +174,14 @@ def main() -> None:
         "Time to fill 29 days with data:\n\t"
         + f"Array: {array_times['fill']} seconds\n\t"
         + f"List:  {list_times['fill']} seconds\n\t"
-        + f"Diff:  {array_times['fill'] -  list_times['fill']}"
+        + f"Diff:  {array_times['fill'] - list_times['fill']}"
     )
 
     print(
         "Day-Slices into 29 days with data:\n\t"
         + f"Array: {array_times['test']/num_runs} seconds\n\t"
         + f"List:  {list_times['test']/num_runs} seconds\n\t"
-        + f"Diff:  {array_times['test']/num_runs -  list_times['test']/num_runs}"
+        + f"Diff:  {array_times['test']/num_runs - list_times['test']/num_runs}"
     )
 
     print(f"       {''.join(['='] * (num_runs + 1))}")
@@ -196,7 +195,7 @@ def main() -> None:
         "Avg of windows of 29 days and running average & mean on every day:\n\t"
         + f"Array: {slicing_array_times['avg']/num_runs} seconds\n\t"
         + f"List:  {slicing_list_times['avg']/num_runs} seconds\n\t"
-        + f"Diff:  {slicing_array_times['avg']/num_runs -  slicing_list_times['avg']/num_runs}"
+        + f"Diff:  {slicing_array_times['avg']/num_runs - slicing_list_times['avg']/num_runs}"
     )
 
     print(
@@ -204,7 +203,7 @@ def main() -> None:
         + f"Array: {slicing_array_times['median']/num_runs} seconds\n\t"
         + f"List:  {slicing_list_times['median']/num_runs} seconds\n\t"
         + "Diff:  "
-        + f"{slicing_array_times['median']/num_runs -  slicing_list_times['median']/num_runs}"
+        + f"{slicing_array_times['median']/num_runs - slicing_list_times['median']/num_runs}"
     )
 
 

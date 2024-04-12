@@ -3,8 +3,9 @@
 
 """Tests for the timeseries averager."""
 
+import contextlib
+from collections.abc import AsyncIterator
 from datetime import datetime, timedelta, timezone
-from typing import List
 
 import numpy as np
 import pytest
@@ -23,9 +24,10 @@ from tests.timeseries.test_moving_window import (
 )
 
 
+@contextlib.asynccontextmanager
 async def init_feature_extractor(
-    data: List[float], period: timedelta
-) -> PeriodicFeatureExtractor:
+    data: list[float], period: timedelta
+) -> AsyncIterator[PeriodicFeatureExtractor]:
     """
     Initialize a PeriodicFeatureExtractor with a `MovingWindow` that contains the data.
 
@@ -33,75 +35,77 @@ async def init_feature_extractor(
         data: The data that is pushed into the moving window.
         period: The distance between two successive windows.
 
-    Returns:
+    Yields:
         PeriodicFeatureExtractor
     """
     window, sender = init_moving_window(timedelta(seconds=len(data)))
-    await push_logical_meter_data(sender, data)
+    async with window:
+        await push_logical_meter_data(sender, data)
+        yield PeriodicFeatureExtractor(moving_window=window, period=period)
 
-    return PeriodicFeatureExtractor(moving_window=window, period=period)
 
-
-async def init_feature_extractor_no_data(period: int) -> PeriodicFeatureExtractor:
+@contextlib.asynccontextmanager
+async def init_feature_extractor_no_data(
+    period: int,
+) -> AsyncIterator[PeriodicFeatureExtractor]:
     """
     Initialize a PeriodicFeatureExtractor with a `MovingWindow` that contains no data.
 
     Args:
         period: The distance between two successive windows.
 
-    Returns:
+    Yields:
         PeriodicFeatureExtractor
     """
     # We only need the moving window to initialize the PeriodicFeatureExtractor class.
-    lm_chan = Broadcast[Sample[Quantity]]("lm_net_power")
+    lm_chan = Broadcast[Sample[Quantity]](name="lm_net_power")
     moving_window = MovingWindow(
         timedelta(seconds=1), lm_chan.new_receiver(), timedelta(seconds=1)
     )
+    async with moving_window:
+        await lm_chan.new_sender().send(
+            Sample(datetime.now(tz=timezone.utc), Quantity(0))
+        )
 
-    await lm_chan.new_sender().send(Sample(datetime.now(tz=timezone.utc), Quantity(0)))
-
-    # Initialize the PeriodicFeatureExtractor class with a period of period seconds.
-    # This works since the sampling period is set to 1 second.
-    return PeriodicFeatureExtractor(moving_window, timedelta(seconds=period))
+        # Initialize the PeriodicFeatureExtractor class with a period of period seconds.
+        # This works since the sampling period is set to 1 second.
+        yield PeriodicFeatureExtractor(moving_window, timedelta(seconds=period))
 
 
 async def test_interval_shifting() -> None:
-    """
-    Test if a interval is properly shifted into a moving window
-    """
-    feature_extractor = await init_feature_extractor(
+    """Test if a interval is properly shifted into a moving window."""
+    async with init_feature_extractor(
         [1, 2, 2, 1, 1, 1, 2, 2, 1, 1], timedelta(seconds=5)
-    )
-
-    # Test if the timestamp is not shifted
-    timestamp = datetime(2023, 1, 1, 0, 0, 1, tzinfo=timezone.utc)
-    index_not_shifted = (
-        feature_extractor._timestamp_to_rel_index(  # pylint: disable=protected-access
-            timestamp
+    ) as feature_extractor:
+        # Test if the timestamp is not shifted
+        timestamp = datetime(2023, 1, 1, 0, 0, 1, tzinfo=timezone.utc)
+        index_not_shifted = (
+            feature_extractor._timestamp_to_rel_index(  # pylint: disable=protected-access
+                timestamp
+            )
+            % feature_extractor._period  # pylint: disable=protected-access
         )
-        % feature_extractor._period  # pylint: disable=protected-access
-    )
-    assert index_not_shifted == 1
+        assert index_not_shifted == 1
 
-    # Test if a timestamp in the window is shifted to the first appearance of the window
-    timestamp = datetime(2023, 1, 1, 0, 0, 6, tzinfo=timezone.utc)
-    index_shifted = (
-        feature_extractor._timestamp_to_rel_index(  # pylint: disable=protected-access
-            timestamp
+        # Test if a timestamp in the window is shifted to the first appearance of the window
+        timestamp = datetime(2023, 1, 1, 0, 0, 6, tzinfo=timezone.utc)
+        index_shifted = (
+            feature_extractor._timestamp_to_rel_index(  # pylint: disable=protected-access
+                timestamp
+            )
+            % feature_extractor._period  # pylint: disable=protected-access
         )
-        % feature_extractor._period  # pylint: disable=protected-access
-    )
-    assert index_shifted == 1
+        assert index_shifted == 1
 
-    # Test if a timestamp outside the window is shifted
-    timestamp = datetime(2023, 1, 1, 0, 0, 11, tzinfo=timezone.utc)
-    index_shifted = (
-        feature_extractor._timestamp_to_rel_index(  # pylint: disable=protected-access
-            timestamp
+        # Test if a timestamp outside the window is shifted
+        timestamp = datetime(2023, 1, 1, 0, 0, 11, tzinfo=timezone.utc)
+        index_shifted = (
+            feature_extractor._timestamp_to_rel_index(  # pylint: disable=protected-access
+                timestamp
+            )
+            % feature_extractor._period  # pylint: disable=protected-access
         )
-        % feature_extractor._period  # pylint: disable=protected-access
-    )
-    assert index_shifted == 1
+        assert index_shifted == 1
 
 
 async def test_feature_extractor() -> None:  # pylint: disable=too-many-statements
@@ -109,55 +113,55 @@ async def test_feature_extractor() -> None:  # pylint: disable=too-many-statemen
     start = UNIX_EPOCH + timedelta(seconds=1)
     end = start + timedelta(seconds=2)
 
-    data: List[float] = [1, 2, 2.5, 1, 1, 1, 2, 2, 1, 1, 2, 2]
+    data: list[float] = [1, 2, 2.5, 1, 1, 1, 2, 2, 1, 1, 2, 2]
 
-    feature_extractor = await init_feature_extractor(data, timedelta(seconds=3))
-    assert np.allclose(feature_extractor.avg(start, end), [5 / 3, 4 / 3])
+    async with init_feature_extractor(data, timedelta(seconds=3)) as feature_extractor:
+        assert np.allclose(feature_extractor.avg(start, end), [5 / 3, 4 / 3])
 
-    feature_extractor = await init_feature_extractor(data, timedelta(seconds=4))
-    assert np.allclose(feature_extractor.avg(start, end), [1, 2])
+    async with init_feature_extractor(data, timedelta(seconds=4)) as feature_extractor:
+        assert np.allclose(feature_extractor.avg(start, end), [1, 2])
 
-    data: List[float] = [1, 2, 2.5, 1, 1, 1, 2, 2, 1, 1, 1, 1, 1, 1, 1]  # type: ignore[no-redef]
+    data: list[float] = [1, 2, 2.5, 1, 1, 1, 2, 2, 1, 1, 1, 1, 1, 1, 1]  # type: ignore[no-redef]
 
-    feature_extractor = await init_feature_extractor(data, timedelta(seconds=5))
-    assert np.allclose(feature_extractor.avg(start, end), [1.5, 1.5])
+    async with init_feature_extractor(data, timedelta(seconds=5)) as feature_extractor:
+        assert np.allclose(feature_extractor.avg(start, end), [1.5, 1.5])
 
     async def _test_fun(  # pylint: disable=too-many-arguments
-        data: List[float],
+        data: list[float],
         period: int,
         start: int,
         end: int,
-        expected: List[float],
-        weights: List[float] | None = None,
+        expected: list[float],
+        weights: list[float] | None = None,
     ) -> None:
-        feature_extractor = await init_feature_extractor(
+        async with init_feature_extractor(
             data, timedelta(seconds=period)
-        )
-        ret = feature_extractor.avg(
-            UNIX_EPOCH + timedelta(seconds=start),
-            UNIX_EPOCH + timedelta(seconds=end),
-            weights=weights,
-        )
-        assert np.allclose(ret, expected)
+        ) as feature_extractor:
+            ret = feature_extractor.avg(
+                UNIX_EPOCH + timedelta(seconds=start),
+                UNIX_EPOCH + timedelta(seconds=end),
+                weights=weights,
+            )
+            assert np.allclose(ret, expected)
 
     async def test_09(
         period: int,
         start: int,
         end: int,
-        expected: List[float],
-        weights: List[float] | None = None,
+        expected: list[float],
+        weights: list[float] | None = None,
     ) -> None:
-        data: List[float] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+        data: list[float] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
         await _test_fun(data, period, start, end, expected, weights)
 
     async def test_011(
         period: int,
         start: int,
         end: int,
-        expected: List[float],
-        weights: List[float] | None = None,
+        expected: list[float],
+        weights: list[float] | None = None,
     ) -> None:
-        data: List[float] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+        data: list[float] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
         await _test_fun(data, period, start, end, expected, weights)
 
     # empty time period
@@ -231,23 +235,28 @@ async def test_feature_extractor() -> None:  # pylint: disable=too-many-statemen
 
 
 async def test_profiler_calculate_np() -> None:
-    """
-    Test the calculation of the average using a numpy array and compare it
-    against the pure python method with the same functionality.
+    """Test calculating the average with numpy and a pure python version.
+
+    Calculate the average using a numpy array and compare the run time against the pure
+    python method with the same functionality.
     """
     data = np.array([2, 2.5, 1, 1, 1, 2])
-    feature_extractor = await init_feature_extractor_no_data(4)
-    window_size = 2
-    reshaped = feature_extractor._reshape_np_array(  # pylint: disable=protected-access
-        data, window_size
-    )
-    result = np.average(reshaped[:, :window_size], axis=0)
-    assert np.allclose(result, np.array([1.5, 2.25]))
+    async with init_feature_extractor_no_data(4) as feature_extractor:
+        window_size = 2
+        reshaped = (
+            feature_extractor._reshape_np_array(  # pylint: disable=protected-access
+                data, window_size
+            )
+        )
+        result = np.average(reshaped[:, :window_size], axis=0)
+        assert np.allclose(result, np.array([1.5, 2.25]))
 
     data = np.array([2, 2, 1, 1, 2])
-    feature_extractor = await init_feature_extractor_no_data(5)
-    reshaped = feature_extractor._reshape_np_array(  # pylint: disable=protected-access
-        data, window_size
-    )
-    result = np.average(reshaped[:, :window_size], axis=0)
-    assert np.allclose(result, np.array([2, 2]))
+    async with init_feature_extractor_no_data(5) as feature_extractor:
+        reshaped = (
+            feature_extractor._reshape_np_array(  # pylint: disable=protected-access
+                data, window_size
+            )
+        )
+        result = np.average(reshaped[:, :window_size], axis=0)
+        assert np.allclose(result, np.array([2, 2]))

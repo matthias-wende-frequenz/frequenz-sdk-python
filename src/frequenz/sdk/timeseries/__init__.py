@@ -15,7 +15,7 @@ All the data produced by this package is always periodic and aligned to the
 Classes normally take a (re)sampling period as and argument and, optionally, an
 `align_to` argument.
 
-This means timestamps are always separated exaclty by a period, and that this
+This means timestamps are always separated exactly by a period, and that this
 timestamp falls always at multiples of the period, starting at the `align_to`.
 
 This ensures that the data is predictable and consistent among restarts.
@@ -35,7 +35,9 @@ Example:
     ```
 """
 
-from ._base_types import UNIX_EPOCH, Sample, Sample3Phase
+from .._internal._channels import ReceiverFetcher
+from ._base_types import UNIX_EPOCH, Bounds, Sample, Sample3Phase
+from ._fuse import Fuse
 from ._moving_window import MovingWindow
 from ._periodic_feature_extractor import PeriodicFeatureExtractor
 from ._quantities import (
@@ -45,14 +47,18 @@ from ._quantities import (
     Percentage,
     Power,
     Quantity,
+    Temperature,
     Voltage,
 )
 from ._resampling import ResamplerConfig
 
 __all__ = [
+    "Bounds",
+    "Fuse",
     "MovingWindow",
     "PeriodicFeatureExtractor",
     "ResamplerConfig",
+    "ReceiverFetcher",
     "Sample",
     "Sample3Phase",
     "UNIX_EPOCH",
@@ -63,6 +69,7 @@ __all__ = [
     "Current",
     "Energy",
     "Power",
+    "Temperature",
     "Voltage",
     "Frequency",
     "Percentage",

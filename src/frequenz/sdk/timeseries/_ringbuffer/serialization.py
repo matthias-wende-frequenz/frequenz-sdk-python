@@ -4,15 +4,15 @@
 """Ringbuffer dumping & loading functions."""
 
 # For use of the class type hint inside the class itself.
-from __future__ import annotations
+
 
 import pickle
 from os.path import exists
 
 from .buffer import FloatArray, OrderedRingBuffer
 
-# Version of the latest file dumping/loading format
 FILE_FORMAT_VERSION: int = 1
+"""Version of the latest file dumping/loading format."""
 
 
 def load(path: str) -> OrderedRingBuffer[FloatArray] | None:
@@ -45,7 +45,7 @@ def load(path: str) -> OrderedRingBuffer[FloatArray] | None:
     return instance
 
 
-def dump(
+def dump(  # noqa: DOC502 (OSError is raised indirectly by open and pickle.dump)
     ringbuffer: OrderedRingBuffer[FloatArray],
     path: str,
     file_format_version: int = FILE_FORMAT_VERSION,
@@ -58,7 +58,7 @@ def dump(
         file_format_version: Version of the file format, optional.
 
     Raises:
-        I/O related exceptions when the file cannot be written.
+        OSError: When the file cannot be opened or written.
     """
     with open(path, mode="wb+") as fileobj:
         pickle.dump((file_format_version, ringbuffer), fileobj)

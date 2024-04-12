@@ -3,12 +3,11 @@
 
 """Class that stores values of the component metrics."""
 
-from __future__ import annotations
 
 from collections.abc import Mapping
 from datetime import datetime
 
-from ...microgrid.component import ComponentMetricId
+from frequenz.client.microgrid import ComponentMetricId
 
 
 class ComponentMetricsData:
@@ -54,9 +53,6 @@ class ComponentMetricsData:
 
         Args:
             metric: metric id
-
-        Raises:
-            KeyError: If given metric is not stored in the object.
 
         Returns:
             Value of the metric.

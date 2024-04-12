@@ -2,25 +2,28 @@
 # Copyright © 2023 Frequenz Energy-as-a-Service GmbH
 
 """Methods for processing battery-inverter data."""
-from __future__ import annotations
+
 
 import asyncio
 import logging
 from abc import ABC, abstractmethod
 from datetime import datetime, timedelta, timezone
-from typing import Generic, Optional
+from typing import Generic
 
 from frequenz.channels import Broadcast, Receiver
 
 from ..._internal._asyncio import cancel_and_await
 from ..._internal._constants import RECEIVER_MAX_SIZE, WAIT_FOR_COMPONENT_DATA_SEC
+from ...actor.power_distributing._component_managers._battery_manager import (
+    _get_battery_inverter_mappings,
+)
 from ._component_metric_fetcher import (
     ComponentMetricFetcher,
     LatestBatteryMetricsFetcher,
     LatestInverterMetricsFetcher,
 )
 from ._component_metrics import ComponentMetricsData
-from ._metric_calculator import MetricCalculator, T, battery_inverter_mapping
+from ._metric_calculator import MetricCalculator, T
 
 _logger = logging.getLogger(__name__)
 
@@ -37,13 +40,11 @@ class MetricAggregator(Generic[T], ABC):
         """
 
     @abstractmethod
-    def new_receiver(
-        self, maxsize: int | None = RECEIVER_MAX_SIZE
-    ) -> Receiver[T | None]:
+    def new_receiver(self, limit: int | None = RECEIVER_MAX_SIZE) -> Receiver[T]:
         """Return new receiver for the aggregated metric results.
 
         Args:
-            maxsize: Buffer size of the receiver
+            limit: Buffer size of the receiver
 
         Returns:
             Receiver for the metric results.
@@ -85,11 +86,17 @@ class SendOnUpdate(MetricAggregator[T]):
             min_update_interval: Minimum frequency for sending update about the change.
         """
         self._metric_calculator: MetricCalculator[T] = metric_calculator
-        self._bat_inv_map = battery_inverter_mapping(self._metric_calculator.batteries)
+        self._bat_inv_map = _get_battery_inverter_mappings(
+            self._metric_calculator.batteries,
+            inv_bats=False,
+            bat_bats=False,
+            inv_invs=False,
+        )["bat_invs"]
+
         self._working_batteries: set[int] = working_batteries.intersection(
             metric_calculator.batteries
         )
-        self._result_channel: Broadcast[Optional[T]] = Broadcast[Optional[T]](
+        self._result_channel: Broadcast[T] = Broadcast(
             name=SendOnUpdate.name() + "_" + metric_calculator.name(),
             resend_latest=True,
         )
@@ -99,9 +106,9 @@ class SendOnUpdate(MetricAggregator[T]):
 
         self._update_task = asyncio.create_task(self._update_and_notify())
         self._send_task = asyncio.create_task(self._send_on_update(min_update_interval))
-        self._pending_data_fetchers: set[
-            asyncio.Task[ComponentMetricsData | None]
-        ] = set()
+        self._pending_data_fetchers: set[asyncio.Task[ComponentMetricsData | None]] = (
+            set()
+        )
 
     @classmethod
     def name(cls) -> str:
@@ -112,20 +119,18 @@ class SendOnUpdate(MetricAggregator[T]):
         """
         return "SendOnUpdate"
 
-    def new_receiver(
-        self, maxsize: int | None = RECEIVER_MAX_SIZE
-    ) -> Receiver[T | None]:
+    def new_receiver(self, limit: int | None = RECEIVER_MAX_SIZE) -> Receiver[T]:
         """Return new receiver for the aggregated metric results.
 
         Args:
-            maxsize: Buffer size of the receiver
+            limit: Buffer size of the receiver
 
         Returns:
             Receiver for the metric results.
         """
-        if maxsize is None:
+        if limit is None:
             return self._result_channel.new_receiver()
-        return self._result_channel.new_receiver(maxsize=maxsize)
+        return self._result_channel.new_receiver(limit=limit)
 
     def update_working_batteries(self, new_working_batteries: set[int]) -> None:
         """Update set of the working batteries.
@@ -141,10 +146,11 @@ class SendOnUpdate(MetricAggregator[T]):
         new_set = new_working_batteries.intersection(self._metric_calculator.batteries)
 
         stopped_working = self._working_batteries - new_set
-        for bid in stopped_working:
+        for battery_id in stopped_working:
             # Removed cached metrics for components that stopped working.
-            self._cached_metrics.pop(bid, None)
-            self._cached_metrics.pop(self._bat_inv_map[bid], None)
+            self._cached_metrics.pop(battery_id, None)
+            for inv_id in self._bat_inv_map[battery_id]:
+                self._cached_metrics.pop(inv_id, None)
 
         if new_set != self._working_batteries:
             self._working_batteries = new_set
@@ -177,7 +183,7 @@ class SendOnUpdate(MetricAggregator[T]):
         _logger.error(
             "Removing component %d from the %s formula.",
             component_id,
-            self._result_channel.name,
+            self._result_channel._name,  # pylint: disable=protected-access
         )
         fetchers.pop(component_id)
 
@@ -233,7 +239,7 @@ class SendOnUpdate(MetricAggregator[T]):
             await self._update_event.wait()
             self._update_event.clear()
 
-            result: T | None = self._metric_calculator.calculate(
+            result: T = self._metric_calculator.calculate(
                 self._cached_metrics, self._working_batteries
             )
             if result != latest_calculation_result:

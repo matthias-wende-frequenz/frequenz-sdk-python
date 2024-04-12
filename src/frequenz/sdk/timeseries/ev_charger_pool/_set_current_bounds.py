@@ -7,14 +7,14 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Dict
 
-from frequenz.channels import Broadcast, Sender
-from frequenz.channels.util import Timer, select, selected_from
+from frequenz.channels import Broadcast, Sender, select, selected_from
+from frequenz.channels.timer import SkipMissedAndDrift, Timer
+from frequenz.client.microgrid import ComponentCategory, MeterData
 
 from ..._internal._asyncio import cancel_and_await
+from ..._internal._channels import LatestValueCache
 from ...microgrid import connection_manager
-from ...microgrid.component import ComponentCategory
 
 _logger = logging.getLogger(__name__)
 
@@ -24,7 +24,10 @@ class ComponentCurrentLimit:
     """A current limit, to be sent to the EV Charger."""
 
     component_id: int
+    """The component ID of the EV Charger."""
+
     max_amps: float
+    """The maximum current in amps, that an EV can draw from this EV Charger."""
 
 
 class BoundsSetter:
@@ -35,6 +38,7 @@ class BoundsSetter:
     """
 
     _NUM_PHASES = 3
+    """Number of phases in the microgrid."""
 
     def __init__(self, repeat_interval: timedelta) -> None:
         """Create a `BoundsSetter` instance.
@@ -46,9 +50,12 @@ class BoundsSetter:
         self._repeat_interval = repeat_interval
 
         self._task: asyncio.Task[None] = asyncio.create_task(self._run())
-        self._bounds_chan: Broadcast[ComponentCurrentLimit] = Broadcast("BoundsSetter")
+        self._bounds_chan: Broadcast[ComponentCurrentLimit] = Broadcast(
+            name="BoundsSetter"
+        )
         self._bounds_rx = self._bounds_chan.new_receiver()
         self._bounds_tx = self._bounds_chan.new_sender()
+        self._meter_data_cache: LatestValueCache[MeterData] | None = None
 
     async def set(self, component_id: int, max_amps: float) -> None:
         """Send the given current limit to the microgrid for the given component id.
@@ -69,6 +76,8 @@ class BoundsSetter:
 
     async def stop(self) -> None:
         """Stop the BoundsSetter."""
+        if self._meter_data_cache is not None:
+            await self._meter_data_cache.stop()
         await self._bounds_chan.close()
         await cancel_and_await(self._task)
 
@@ -84,27 +93,29 @@ class BoundsSetter:
         """
         api_client = connection_manager.get().api_client
         graph = connection_manager.get().component_graph
-        meters = graph.components(component_category={ComponentCategory.METER})
+        meters = graph.components(component_categories={ComponentCategory.METER})
         if not meters:
             err = "No meters found in the component graph."
             _logger.error(err)
             raise RuntimeError(err)
 
-        meter_data = (
+        self._meter_data_cache = LatestValueCache(
             await api_client.meter_data(next(iter(meters)).component_id)
-        ).into_peekable()
-        latest_bound: Dict[int, ComponentCurrentLimit] = {}
+        )
+        latest_bound: dict[int, ComponentCurrentLimit] = {}
 
         bound_chan = self._bounds_rx
-        timer = Timer.timeout(timedelta(self._repeat_interval.total_seconds()))
+        timer = Timer(
+            timedelta(self._repeat_interval.total_seconds()), SkipMissedAndDrift()
+        )
 
         async for selected in select(bound_chan, timer):
-            meter = meter_data.peek()
+            meter = self._meter_data_cache.get()
             if meter is None:
                 raise ValueError("Meter channel closed.")
 
             if selected_from(selected, bound_chan):
-                bound: ComponentCurrentLimit = selected.value
+                bound: ComponentCurrentLimit = selected.message
                 if (
                     bound.component_id in latest_bound
                     and latest_bound[bound.component_id] == bound
@@ -112,7 +123,7 @@ class BoundsSetter:
                     continue
                 latest_bound[bound.component_id] = bound
                 min_voltage = min(meter.voltage_per_phase)
-                logging.info("sending new bounds: %s", bound)
+                _logger.info("sending new bounds: %s", bound)
                 await api_client.set_bounds(
                     bound.component_id,
                     0,
@@ -121,7 +132,7 @@ class BoundsSetter:
             elif selected_from(selected, timer):
                 for bound in latest_bound.values():
                     min_voltage = min(meter.voltage_per_phase)
-                    logging.debug("resending bounds: %s", bound)
+                    _logger.debug("resending bounds: %s", bound)
                     await api_client.set_bounds(
                         bound.component_id,
                         0,

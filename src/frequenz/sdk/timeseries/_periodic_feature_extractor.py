@@ -12,12 +12,10 @@ underlying buffer, e.g. the moving window, with the same start and end time
 modulo a fixed period.
 """
 
-from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import List, Tuple
 
 import numpy as np
 from numpy.typing import NDArray
@@ -35,10 +33,10 @@ class RelativePositions:
     Holds the relative positions of a window in a buffer.
 
     When calculating a profile the user has to pass two datetime objects which
-    are determaning a window. It's allowed that this window is not contained in
+    are determining a window. It's allowed that this window is not contained in
     the historical data buffer.
     In order to calculate the profile the window is shifted to the first
-    position in the buffer where it occurrs first and represented by indexes
+    position in the buffer where it occurs first and represented by indexes
     relative to the oldest sample in the buffer.
     """
 
@@ -82,28 +80,27 @@ class PeriodicFeatureExtractor:
         from frequenz.sdk import microgrid
         from datetime import datetime, timedelta, timezone
 
-        moving_window = MovingWindow(
+        async with MovingWindow(
             size=timedelta(days=35),
-            resampled_data_recv=microgrid.logical_meter().grid_power.new_receiver(),
+            resampled_data_recv=microgrid.grid().power.new_receiver(),
             input_sampling_period=timedelta(seconds=1),
-        )
+        ) as moving_window:
+            feature_extractor = PeriodicFeatureExtractor(
+                moving_window=moving_window,
+                period=timedelta(days=7),
+            )
 
-        feature_extractor = PeriodicFeatureExtractor(
-            moving_window = moving_window,
-            period=timedelta(days=7),
-        )
+            now = datetime.now(timezone.utc)
 
-        now = datetime.now(timezone.utc)
+            # create a daily weighted average for the next 24h
+            avg_24h = feature_extractor.avg(
+                now,
+                now + timedelta(hours=24),
+                weights=[0.1, 0.2, 0.3, 0.4]
+            )
 
-        # create a daily weighted average for the next 24h
-        avg_24h = feature_extractor.avg(
-            now,
-            now + timedelta(hours=24),
-            weights=[0.1, 0.2, 0.3, 0.4]
-        )
-
-        # create a daily average for Thursday March 23 2023
-        th_avg_24h = feature_extractor.avg(datetime(2023, 3, 23), datetime(2023, 3, 24))
+            # create a daily average for Thursday March 23 2023
+            th_avg_24h = feature_extractor.avg(datetime(2023, 3, 23), datetime(2023, 3, 24))
         ```
     """
 
@@ -131,13 +128,13 @@ class PeriodicFeatureExtractor:
         """Distance between two succeeding intervals in samples."""
 
         _logger.debug("Initializing PeriodicFeatureExtractor!")
-        _logger.debug("MovingWindow size: %i", len(self._moving_window))
+        _logger.debug("MovingWindow size: %i", self._moving_window.count_valid())
         _logger.debug(
             "Period between two succeeding intervals (in samples): %i",
             self._period,
         )
 
-        if not len(self._moving_window) % self._period == 0:
+        if not self._moving_window.count_valid() % self._period == 0:
             raise ValueError(
                 "The MovingWindow size is not a integer multiple of the period."
             )
@@ -251,9 +248,6 @@ class PeriodicFeatureExtractor:
 
         Returns:
             The relative positions of the start, end and next samples.
-
-        Raises:
-            ValueError: If the start timestamp is after the end timestamp.
         """
         # The number of usable windows can change, when the current position of
         # the ringbuffer is inside one of the windows inside the MovingWindow.
@@ -264,7 +258,7 @@ class PeriodicFeatureExtractor:
         # the current position is inside that window or the window that would
         # be overwritten next.
         #
-        # Move the window to its first appereance in the MovingWindow relative
+        # Move the window to its first appearance in the MovingWindow relative
         # to the oldest sample stored in the MovingWindow.
         #
         # In other words the oldest stored sample is considered to have index 0.
@@ -295,7 +289,7 @@ class PeriodicFeatureExtractor:
 
     def _get_buffer_bounds(
         self, start: datetime, end: datetime
-    ) -> Tuple[int, int, int]:
+    ) -> tuple[int, int, int]:
         """
         Get the bounds of the ringbuffer used for further operations.
 
@@ -329,7 +323,7 @@ class PeriodicFeatureExtractor:
 
         rel_pos = self._get_relative_positions(start, window_size)
 
-        if window_size > len(self._moving_window):
+        if window_size > self._moving_window.count_valid():
             raise ValueError(
                 "The window size must be smaller than the size of the `MovingWindow`"
             )
@@ -356,7 +350,7 @@ class PeriodicFeatureExtractor:
 
         # add the offset to the oldest sample in the ringbuffer and wrap around
         # to get the start and end positions in the ringbuffer
-        rb_offset = self._buffer.datetime_to_index(self._buffer.time_bound_oldest)
+        rb_offset = self._buffer.to_internal_index(self._buffer.time_bound_oldest)
         start_pos = self._buffer.wrap(end_pos + self._period + rb_offset)
         end_pos = self._buffer.wrap(end_pos + rb_offset)
 
@@ -367,11 +361,11 @@ class PeriodicFeatureExtractor:
 
     def _get_reshaped_np_array(
         self, start: datetime, end: datetime
-    ) -> Tuple[NDArray[np.float_], int]:
+    ) -> tuple[NDArray[np.float_], int]:
         """
         Create a reshaped numpy array from the MovingWindow.
 
-        The reshaped array is a two dimemsional array, where one dimension is
+        The reshaped array is a two dimensional array, where one dimension is
         the window_size and the other the number of windows returned by the
         `_get_buffer_bounds` method.
 
@@ -385,7 +379,7 @@ class PeriodicFeatureExtractor:
         (start_pos, end_pos, window_size) = self._get_buffer_bounds(start, end)
 
         if start_pos >= end_pos:
-            window_start = self._buffer[start_pos : len(self._moving_window)]
+            window_start = self._buffer[start_pos : self._moving_window.count_valid()]
             window_end = self._buffer[0:end_pos]
             # make the linter happy
             assert isinstance(window_start, np.ndarray)
@@ -397,7 +391,7 @@ class PeriodicFeatureExtractor:
         return (self._reshape_np_array(window_array, window_size), window_size)
 
     def avg(
-        self, start: datetime, end: datetime, weights: List[float] | None = None
+        self, start: datetime, end: datetime, weights: list[float] | None = None
     ) -> NDArray[np.float_]:
         """
         Create the average window out of the window defined by `start` and `end`.

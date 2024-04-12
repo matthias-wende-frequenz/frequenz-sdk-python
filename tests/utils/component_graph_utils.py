@@ -2,12 +2,16 @@
 # Copyright © 2023 Frequenz Energy-as-a-Service GmbH
 
 """Utils for tests that uses component graph."""
-from __future__ import annotations
+
 
 from dataclasses import dataclass
 
-from frequenz.sdk.microgrid.client import Connection
-from frequenz.sdk.microgrid.component import Component, ComponentCategory, InverterType
+from frequenz.client.microgrid import (
+    Component,
+    ComponentCategory,
+    Connection,
+    InverterType,
+)
 
 
 @dataclass

@@ -10,13 +10,11 @@ component graph.
 
 import logging
 from abc import ABC, abstractmethod
-from typing import Optional
 
 import grpc.aio as grpcaio
+from frequenz.client.microgrid import ApiClient, Location, Metadata
 
-from ._graph import ComponentGraph, _MicrogridComponentGraph
-from .client import MicrogridApiClient
-from .client._client import MicrogridGrpcClient
+from .component_graph import ComponentGraph, _MicrogridComponentGraph
 
 # Not public default host and port
 _DEFAULT_MICROGRID_HOST = "[::1]"
@@ -59,8 +57,8 @@ class ConnectionManager(ABC):
 
     @property
     @abstractmethod
-    def api_client(self) -> MicrogridApiClient:
-        """Get MicrogridApiClient.
+    def api_client(self) -> ApiClient:
+        """Get ApiClient.
 
         Returns:
             api client
@@ -73,6 +71,24 @@ class ConnectionManager(ABC):
 
         Returns:
             component graph
+        """
+
+    @property
+    @abstractmethod
+    def microgrid_id(self) -> int | None:
+        """Get the ID of the microgrid if available.
+
+        Returns:
+            the ID of the microgrid if available, None otherwise.
+        """
+
+    @property
+    @abstractmethod
+    def location(self) -> Location | None:
+        """Get the location of the microgrid if available.
+
+        Returns:
+            the location of the microgrid if available, None otherwise.
         """
 
     async def _update_api(self, host: str, port: int) -> None:
@@ -99,19 +115,40 @@ class _InsecureConnectionManager(ConnectionManager):
         super().__init__(host, port)
         target = f"{host}:{port}"
         grpc_channel = grpcaio.insecure_channel(target)
-        self._api = MicrogridGrpcClient(grpc_channel, target)
+        self._api = ApiClient(grpc_channel, target)
         # To create graph from the api we need await.
         # So create empty graph here, and update it in `run` method.
         self._graph = _MicrogridComponentGraph()
 
+        self._metadata: Metadata
+        """The metadata of the microgrid."""
+
     @property
-    def api_client(self) -> MicrogridApiClient:
-        """Get MicrogridApiClient.
+    def api_client(self) -> ApiClient:
+        """Get ApiClient.
 
         Returns:
             api client
         """
         return self._api
+
+    @property
+    def microgrid_id(self) -> int | None:
+        """Get the ID of the microgrid if available.
+
+        Returns:
+            the ID of the microgrid if available, None otherwise.
+        """
+        return self._metadata.microgrid_id
+
+    @property
+    def location(self) -> Location | None:
+        """Get the location of the microgrid if available.
+
+        Returns:
+            the location of the microgrid if available, None otherwise.
+        """
+        return self._metadata.location
 
     @property
     def component_graph(self) -> ComponentGraph:
@@ -133,14 +170,17 @@ class _InsecureConnectionManager(ConnectionManager):
 
         target = f"{host}:{port}"
         grpc_channel = grpcaio.insecure_channel(target)
-        self._api = MicrogridGrpcClient(grpc_channel, target)
+        self._api = ApiClient(grpc_channel, target)
+        self._metadata = await self._api.metadata()
         await self._graph.refresh_from_api(self._api)
 
     async def _initialize(self) -> None:
+        self._metadata = await self._api.metadata()
         await self._graph.refresh_from_api(self._api)
 
 
-_CONNECTION_MANAGER: Optional[ConnectionManager] = None
+_CONNECTION_MANAGER: ConnectionManager | None = None
+"""The ConnectionManager singleton instance."""
 
 
 async def initialize(host: str, port: int) -> None:

@@ -2,25 +2,100 @@
 # Copyright © 2022 Frequenz Energy-as-a-Service GmbH
 
 """Setup for all the tests."""
-import pytest
+import contextlib
+from collections.abc import Iterator
+from datetime import timedelta
 
-from frequenz.sdk.actor import _decorator
+import pytest
+import time_machine
+
+from frequenz.sdk.actor import _actor
 
 # Used to impose a hard time limit for some async tasks in tests so that tests don't
 # run forever in case of a bug
-SAFETY_TIMEOUT = 10.0
+SAFETY_TIMEOUT = timedelta(seconds=10.0)
+
+
+@contextlib.contextmanager
+def actor_restart_limit(limit: int) -> Iterator[None]:
+    """Temporarily set the actor restart limit to a given value.
+
+    Example:
+        ```python
+        with actor_restart_limit(0):  # No restart
+            async with MyActor() as actor:
+                # Do something with actor
+        ```
+
+    Args:
+        limit: The new limit.
+    """
+    # pylint: disable=protected-access
+    original_limit = _actor.Actor._restart_limit
+    print(
+        f"<actor_restart_limit> Changing the restart limit from {original_limit} to {limit}"
+    )
+    _actor.Actor._restart_limit = limit
+    try:
+        yield
+    finally:
+        print(f"<actor_restart_limit> Resetting restart limit to {original_limit}")
+        _actor.Actor._restart_limit = original_limit
 
 
 @pytest.fixture(scope="session", autouse=True)
-def disable_actor_auto_restart():  # type: ignore
-    """Disable auto-restart of actors while running tests.
+def disable_actor_auto_restart() -> Iterator[None]:
+    """Disable auto-restart of actors while running tests."""
+    with actor_restart_limit(0):
+        yield
 
-    At some point we had a version that would set the limit back to the
-    original value but it doesn't work because some actors will keep running
-    even after the end of the session and fail after the original value was
-    reestablished, getting into an infinite loop again.
 
-    Note: Test class must derive after unittest.IsolatedAsyncioTestCase.
-    Otherwise this fixture won't run.
+@pytest.fixture
+def actor_auto_restart_once() -> Iterator[None]:
+    """Make actors restart only once."""
+    with actor_restart_limit(1):
+        yield
+
+
+@contextlib.contextmanager
+def actor_restart_delay(delay: float | timedelta) -> Iterator[None]:
+    """Temporarily set the actor restart delay to a given value.
+
+    Example:
+        ```python
+        with actor_restart_delay(0.0):  # No delay
+            async with MyActor() as actor:
+                # Do something with actor
+        ```
+
+    Args:
+        delay: The new delay.
     """
-    _decorator.BaseActor.restart_limit = 0
+    if isinstance(delay, float):
+        delay = timedelta(seconds=delay)
+    original_delay = _actor.Actor.RESTART_DELAY
+    print(
+        f"<actor_restart_delay> Changing the `RESTART_DELAY` from "
+        f"{original_delay} to {delay}"
+    )
+
+    _actor.Actor.RESTART_DELAY = delay
+    try:
+        yield
+    finally:
+        print(f"<actor_restart_limit> Resetting restart limit to {original_delay}")
+        _actor.Actor.RESTART_DELAY = original_delay
+
+
+@pytest.fixture(scope="session", autouse=True)
+def disable_actor_restart_delay() -> Iterator[None]:
+    """Disable auto-restart of actors while running tests."""
+    with actor_restart_delay(0.0):
+        yield
+
+
+@pytest.fixture
+def fake_time() -> Iterator[time_machine.Coordinates]:
+    """Replace real time with a time machine that doesn't automatically tick."""
+    with time_machine.travel(0, tick=False) as traveller:
+        yield traveller

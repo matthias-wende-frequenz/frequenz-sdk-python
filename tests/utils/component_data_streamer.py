@@ -2,14 +2,15 @@
 # Copyright © 2023 Frequenz Energy-as-a-Service GmbH
 
 """Tool for mocking streams of component data."""
-from __future__ import annotations
+
 
 import asyncio
 from dataclasses import replace
 from datetime import datetime, timezone
 
+from frequenz.client.microgrid import ComponentData
+
 from frequenz.sdk._internal._asyncio import cancel_and_await
-from frequenz.sdk.microgrid.component import ComponentData
 
 from .mock_microgrid_client import MockMicrogridClient
 

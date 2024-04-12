@@ -6,32 +6,34 @@
 
 import asyncio
 import logging
-from typing import Any
 
-from ._decorator import BaseActor
+from ._actor import Actor
 
 _logger = logging.getLogger(__name__)
 
 
-async def run(*actors: Any) -> None:
+async def run(*actors: Actor) -> None:
     """Await the completion of all actors.
 
+    !!! info
+
+        Please read the [`actor` module documentation][frequenz.sdk.actor] for more
+        comprehensive guide on how to use and implement actors properly.
+
     Args:
-        actors: the actors to be awaited.
-
-    Raises:
-        AssertionError: if any of the actors is not an instance of BaseActor.
+        *actors: the actors to be awaited.
     """
-    # Check that each actor is an instance of BaseActor at runtime,
-    # due to the indirection created by the actor decorator.
-    for actor in actors:
-        assert isinstance(actor, BaseActor), f"{actor} is not an instance of BaseActor"
+    _logger.info("Starting %s actor(s)...", len(actors))
 
-    pending_tasks = set()
     for actor in actors:
-        pending_tasks.add(asyncio.create_task(actor.join(), name=str(actor)))
+        if actor.is_running:
+            _logger.info("Actor %s: Already running, skipping start.", actor)
+        else:
+            _logger.info("Actor %s: Starting...", actor)
+            actor.start()
 
-    # Currently the actor decorator manages the life-cycle of the actor tasks
+    # Wait until all actors are done
+    pending_tasks = {asyncio.create_task(a.wait(), name=str(a)) for a in actors}
     while pending_tasks:
         done_tasks, pending_tasks = await asyncio.wait(
             pending_tasks, return_when=asyncio.FIRST_COMPLETED
@@ -42,12 +44,14 @@ async def run(*actors: Any) -> None:
             # Cancellation needs to be checked first, otherwise the other methods
             # could raise a CancelledError
             if task.cancelled():
-                _logger.info("The actor %s was cancelled", task.get_name())
+                _logger.info("Actor %s: Cancelled while running.", task.get_name())
             elif exception := task.exception():
                 _logger.error(
-                    "The actor %s was finished due to an uncaught exception",
+                    "Actor %s: Raised an exception while running.",
                     task.get_name(),
                     exc_info=exception,
                 )
             else:
-                _logger.info("The actor %s finished normally", task.get_name())
+                _logger.info("Actor %s: Finished normally.", task.get_name())
+
+    _logger.info("All %s actor(s) finished.", len(actors))

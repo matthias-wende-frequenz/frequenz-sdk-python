@@ -1,18 +1,24 @@
 # License: MIT
 # Copyright © 2022 Frequenz Energy-as-a-Service GmbH
 
-"""Tests of MicrogridApi"""
+"""Tests of MicrogridApi."""
+
 import asyncio
+import zoneinfo
 from asyncio.tasks import ALL_COMPLETED
-from typing import List
 from unittest import mock
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from frequenz.client.microgrid import (
+    Component,
+    ComponentCategory,
+    Connection,
+    Location,
+    Metadata,
+)
 
 from frequenz.sdk.microgrid import connection_manager
-from frequenz.sdk.microgrid.client import Connection
-from frequenz.sdk.microgrid.component import Component, ComponentCategory
 
 
 class TestMicrogridApi:
@@ -20,7 +26,7 @@ class TestMicrogridApi:
 
     # ignore mypy: Untyped decorator makes function "components" untyped
     @pytest.fixture
-    def components(self) -> List[List[Component]]:
+    def components(self) -> list[list[Component]]:
         """Get components in the graph.
 
         Override this method to create a graph with different components.
@@ -34,7 +40,6 @@ class TestMicrogridApi:
                 Component(1, ComponentCategory.GRID),
                 Component(4, ComponentCategory.METER),
                 Component(5, ComponentCategory.METER),
-                Component(6, ComponentCategory.PV_ARRAY),
                 Component(7, ComponentCategory.METER),
                 Component(8, ComponentCategory.INVERTER),
                 Component(9, ComponentCategory.BATTERY),
@@ -54,7 +59,7 @@ class TestMicrogridApi:
 
     # ignore mypy: Untyped decorator makes function "components" untyped
     @pytest.fixture
-    def connections(self) -> List[List[Connection]]:
+    def connections(self) -> list[list[Connection]]:
         """Get connections between components in the graph.
 
         Override this method to create a graph with different connections.
@@ -67,7 +72,6 @@ class TestMicrogridApi:
             [
                 Connection(1, 4),
                 Connection(1, 5),
-                Connection(5, 6),
                 Connection(1, 7),
                 Connection(7, 8),
                 Connection(8, 9),
@@ -84,26 +88,45 @@ class TestMicrogridApi:
         ]
         return connections
 
+    @pytest.fixture
+    def metadata(self) -> Metadata:
+        """Fetch the microgrid metadata.
+
+        Returns:
+            the microgrid metadata.
+        """
+        return Metadata(
+            microgrid_id=8,
+            location=Location(
+                latitude=52.520008,
+                longitude=13.404954,
+                timezone=zoneinfo.ZoneInfo("Europe/Berlin"),
+            ),
+        )
+
     @mock.patch("grpc.aio.insecure_channel")
     async def test_connection_manager(
         self,
-        _: MagicMock,
-        components: List[List[Component]],
-        connections: List[List[Connection]],
+        _insecure_channel_mock: MagicMock,
+        components: list[list[Component]],
+        connections: list[list[Connection]],
+        metadata: Metadata,
     ) -> None:
         """Test microgrid api.
 
         Args:
-            _: insecure channel mock from `mock.patch`
+            _insecure_channel_mock: insecure channel mock from `mock.patch`
             components: components
             connections: connections
+            metadata: the metadata of the microgrid
         """
         microgrid_client = MagicMock()
         microgrid_client.components = AsyncMock(side_effect=components)
         microgrid_client.connections = AsyncMock(side_effect=connections)
+        microgrid_client.metadata = AsyncMock(return_value=metadata)
 
         with mock.patch(
-            "frequenz.sdk.microgrid.connection_manager.MicrogridGrpcClient",
+            "frequenz.sdk.microgrid.connection_manager.ApiClient",
             return_value=microgrid_client,
         ):
             # Get instance without initializing git first.
@@ -139,6 +162,11 @@ class TestMicrogridApi:
             assert set(graph.components()) == set(components[0])
             assert set(graph.connections()) == set(connections[0])
 
+            assert api.microgrid_id == metadata.microgrid_id
+            assert api.location == metadata.location
+            assert api.location and api.location.timezone
+            assert api.location.timezone.key == "Europe/Berlin"
+
             # It should not be possible to initialize method once again
             with pytest.raises(AssertionError):
                 await connection_manager.initialize("127.0.0.1", 10001)
@@ -150,26 +178,36 @@ class TestMicrogridApi:
             assert set(graph.components()) == set(components[0])
             assert set(graph.connections()) == set(connections[0])
 
+            assert api.microgrid_id == metadata.microgrid_id
+            assert api.location == metadata.location
+
     @mock.patch("grpc.aio.insecure_channel")
     async def test_connection_manager_another_method(
         self,
-        _: MagicMock,
-        components: List[List[Component]],
-        connections: List[List[Connection]],
+        _insecure_channel_mock: MagicMock,
+        components: list[list[Component]],
+        connections: list[list[Connection]],
+        metadata: Metadata,
     ) -> None:
         """Test if the api was not deallocated.
 
         Args:
-            _: insecure channel mock
+            _insecure_channel_mock: insecure channel mock
             components: components
             connections: connections
+            metadata: the metadata of the microgrid
         """
-
         microgrid_client = MagicMock()
         microgrid_client.components = AsyncMock(return_value=[])
         microgrid_client.connections = AsyncMock(return_value=[])
+        microgrid_client.get_metadata = AsyncMock(return_value=None)
 
         api = connection_manager.get()
         graph = api.component_graph
         assert set(graph.components()) == set(components[0])
         assert set(graph.connections()) == set(connections[0])
+
+        assert api.microgrid_id == metadata.microgrid_id
+        assert api.location == metadata.location
+        assert api.location and api.location.timezone
+        assert api.location.timezone.key == "Europe/Berlin"

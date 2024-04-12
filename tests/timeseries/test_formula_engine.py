@@ -4,23 +4,23 @@
 """Tests for the FormulaEngine and the Tokenizer."""
 
 import asyncio
+from collections.abc import Callable
 from datetime import datetime
-from typing import Callable, Dict, List, Optional, Tuple, Union
 
 from frequenz.channels import Broadcast, Receiver
 
 from frequenz.sdk.timeseries import Sample
-from frequenz.sdk.timeseries._formula_engine._formula_engine import (
+from frequenz.sdk.timeseries._quantities import Power, Quantity
+from frequenz.sdk.timeseries.formula_engine._formula_engine import (
     FormulaBuilder,
     FormulaEngine,
     HigherOrderFormulaBuilder,
 )
-from frequenz.sdk.timeseries._formula_engine._tokenizer import (
+from frequenz.sdk.timeseries.formula_engine._tokenizer import (
     Token,
     Tokenizer,
     TokenType,
 )
-from frequenz.sdk.timeseries._quantities import Power, Quantity
 
 
 class TestTokenizer:
@@ -52,20 +52,20 @@ class TestFormulaEngine:
         self,
         formula: str,
         postfix: str,
-        io_pairs: List[Tuple[List[Optional[float]], Optional[float]]],
+        io_pairs: list[tuple[list[float | None], float | None]],
         nones_are_zeros: bool = False,
     ) -> None:
         """Run a formula test."""
-        channels: Dict[str, Broadcast[Sample[Quantity]]] = {}
+        channels: dict[str, Broadcast[Sample[Quantity]]] = {}
         builder = FormulaBuilder("test_formula", Quantity)
         for token in Tokenizer(formula):
             if token.type == TokenType.COMPONENT_METRIC:
                 if token.value not in channels:
-                    channels[token.value] = Broadcast(token.value)
+                    channels[token.value] = Broadcast(name=token.value)
                 builder.push_metric(
                     f"#{token.value}",
                     channels[token.value].new_receiver(),
-                    nones_are_zeros,
+                    nones_are_zeros=nones_are_zeros,
                 )
             elif token.type == TokenType.OPER:
                 builder.push_oper(token.value)
@@ -316,16 +316,29 @@ class TestFormulaEngineComposition:
     async def run_test(  # pylint: disable=too-many-locals
         self,
         num_items: int,
-        make_builder: Union[
+        make_builder: (
             Callable[
+                [
+                    FormulaEngine[Quantity],
+                ],
+                HigherOrderFormulaBuilder[Quantity],
+            ]
+            | Callable[
+                [
+                    FormulaEngine[Quantity],
+                    FormulaEngine[Quantity],
+                ],
+                HigherOrderFormulaBuilder[Quantity],
+            ]
+            | Callable[
                 [
                     FormulaEngine[Quantity],
                     FormulaEngine[Quantity],
                     FormulaEngine[Quantity],
                 ],
                 HigherOrderFormulaBuilder[Quantity],
-            ],
-            Callable[
+            ]
+            | Callable[
                 [
                     FormulaEngine[Quantity],
                     FormulaEngine[Quantity],
@@ -333,19 +346,21 @@ class TestFormulaEngineComposition:
                     FormulaEngine[Quantity],
                 ],
                 HigherOrderFormulaBuilder[Quantity],
-            ],
-        ],
-        io_pairs: List[Tuple[List[Optional[float]], Optional[float]]],
+            ]
+        ),
+        io_pairs: list[tuple[list[float | None], float | None]],
         nones_are_zeros: bool = False,
     ) -> None:
         """Run a test with the specs provided."""
-        channels = [Broadcast[Sample[Quantity]](str(ctr)) for ctr in range(num_items)]
+        channels = [
+            Broadcast[Sample[Quantity]](name=str(ctr)) for ctr in range(num_items)
+        ]
         l1_engines = [
             self.make_engine(ctr, channels[ctr].new_receiver())
             for ctr in range(num_items)
         ]
         builder = make_builder(*l1_engines)
-        engine = builder.build("l2 formula", nones_are_zeros)
+        engine = builder.build("l2 formula", nones_are_zeros=nones_are_zeros)
         result_chan = engine.new_receiver()
 
         now = datetime.now()
@@ -439,6 +454,78 @@ class TestFormulaEngineComposition:
             ],
         )
 
+    async def test_min_max(self) -> None:
+        """Test min and max functions in combination."""
+        await self.run_test(
+            3,
+            lambda c2, c4, c5: c2.min(c4).max(c5),
+            [
+                ([4.0, 6.0, 5.0], 5.0),
+            ],
+        )
+
+    async def test_max(self) -> None:
+        """Test the max function."""
+        await self.run_test(
+            3,
+            lambda c2, c4, c5: c2 * c4.max(c5),
+            [
+                ([10.0, 12.0, 15.0], 150.0),
+            ],
+        )
+        await self.run_test(
+            3,
+            lambda c2, c4, c5: (c2 * c4).max(c5),
+            [
+                ([10.0, 12.0, 15.0], 120.0),
+            ],
+        )
+        await self.run_test(
+            3,
+            lambda c2, c4, c5: (c2 + c4).max(c5),
+            [
+                ([10.0, 12.0, 15.0], 22.0),
+            ],
+        )
+        await self.run_test(
+            3,
+            lambda c2, c4, c5: c2 + c4.max(c5),
+            [
+                ([10.0, 12.0, 15.0], 25.0),
+            ],
+        )
+
+    async def test_min(self) -> None:
+        """Test the min function."""
+        await self.run_test(
+            3,
+            lambda c2, c4, c5: (c2 * c4).min(c5),
+            [
+                ([10.0, 12.0, 15.0], 15.0),
+            ],
+        )
+        await self.run_test(
+            3,
+            lambda c2, c4, c5: c2 * c4.min(c5),
+            [
+                ([10.0, 12.0, 15.0], 120.0),
+            ],
+        )
+        await self.run_test(
+            3,
+            lambda c2, c4, c5: (c2 + c4).min(c5),
+            [
+                ([10.0, 2.0, 15.0], 12.0),
+            ],
+        )
+        await self.run_test(
+            3,
+            lambda c2, c4, c5: c2 + c4.min(c5),
+            [
+                ([10.0, 12.0, 15.0], 22.0),
+            ],
+        )
+
     async def test_compound(self) -> None:
         """Test compound formulas."""
         await self.run_test(
@@ -514,6 +601,95 @@ class TestFormulaEngineComposition:
             ],
         )
 
+    async def test_consumption(self) -> None:
+        """Test the consumption operator."""
+        await self.run_test(
+            1,
+            lambda c1: c1.consumption(),
+            [
+                ([10.0], 10.0),
+                ([-10.0], 0.0),
+            ],
+        )
+
+    async def test_production(self) -> None:
+        """Test the production operator."""
+        await self.run_test(
+            1,
+            lambda c1: c1.production(),
+            [
+                ([10.0], 0.0),
+                ([-10.0], 10.0),
+            ],
+        )
+
+    async def test_consumption_production(self) -> None:
+        """Test the consumption and production operator combined."""
+        await self.run_test(
+            2,
+            lambda c1, c2: c1.consumption() + c2.production(),
+            [
+                ([10.0, 12.0], 10.0),
+                ([-12.0, -10.0], 10.0),
+            ],
+        )
+        await self.run_test(
+            2,
+            lambda c1, c2: c1.consumption() + c2.consumption(),
+            [
+                ([10.0, -12.0], 10.0),
+                ([-10.0, 12.0], 12.0),
+            ],
+        )
+        await self.run_test(
+            2,
+            lambda c1, c2: c1.production() + c2.production(),
+            [
+                ([10.0, -12.0], 12.0),
+                ([-10.0, 12.0], 10.0),
+            ],
+        )
+        await self.run_test(
+            2,
+            lambda c1, c2: c1.min(c2).consumption(),
+            [
+                ([10.0, -12.0], 0.0),
+                ([10.0, 12.0], 10.0),
+            ],
+        )
+        await self.run_test(
+            2,
+            lambda c1, c2: c1.max(c2).consumption(),
+            [
+                ([10.0, -12.0], 10.0),
+                ([-10.0, -12.0], 0.0),
+            ],
+        )
+        await self.run_test(
+            2,
+            lambda c1, c2: c1.min(c2).production(),
+            [
+                ([10.0, -12.0], 12.0),
+                ([10.0, 12.0], 0.0),
+            ],
+        )
+        await self.run_test(
+            2,
+            lambda c1, c2: c1.max(c2).production(),
+            [
+                ([10.0, -12.0], 0.0),
+                ([-10.0, -12.0], 10.0),
+            ],
+        )
+        await self.run_test(
+            2,
+            lambda c1, c2: c1.production() + c2,
+            [
+                ([10.0, -12.0], -12.0),
+                ([-10.0, -12.0], -2.0),
+            ],
+        )
+
     async def test_nones_are_zeros(self) -> None:
         """Test that `None`s are treated as zeros when configured."""
         await self.run_test(
@@ -571,91 +747,27 @@ class TestFormulaEngineComposition:
         )
 
 
-class TestFormulaAverager:
-    """Tests for the formula step for calculating average."""
-
-    async def run_test(
-        self,
-        components: List[str],
-        io_pairs: List[Tuple[List[Optional[float]], Optional[float]]],
-    ) -> None:
-        """Run a formula test."""
-        channels: Dict[str, Broadcast[Sample[Quantity]]] = {}
-        streams: List[Tuple[str, Receiver[Sample[Quantity]], bool]] = []
-        builder = FormulaBuilder("test_averager", create_method=Quantity)
-        for comp_id in components:
-            if comp_id not in channels:
-                channels[comp_id] = Broadcast(comp_id)
-                streams.append((f"{comp_id}", channels[comp_id].new_receiver(), False))
-
-        builder.push_average(streams)
-        engine = builder.build()
-        results_rx = engine.new_receiver()
-        now = datetime.now()
-        tests_passed = 0
-        for io_pair in io_pairs:
-            io_input, io_output = io_pair
-            await asyncio.gather(
-                *[
-                    chan.new_sender().send(
-                        Sample(now, None if not value else Quantity(value))
-                    )
-                    for chan, value in zip(channels.values(), io_input)
-                ]
-            )
-            next_val = await results_rx.receive()
-            if io_output is None:
-                assert next_val.value is None
-            else:
-                assert next_val.value and next_val.value.base_value == io_output
-            tests_passed += 1
-        await engine._stop()  # pylint: disable=protected-access
-        assert tests_passed == len(io_pairs)
-
-    async def test_simple(self) -> None:
-        """Test simple formulas."""
-        await self.run_test(
-            ["#2", "#4", "#5"],
-            [
-                ([10.0, 12.0, 14.0], 12.0),
-                ([15.0, 17.0, 19.0], 17.0),
-                ([11.1, 11.1, 11.1], 11.1),
-            ],
-        )
-
-    async def test_nones_are_skipped(self) -> None:
-        """Test that `None`s are skipped for computing the average."""
-        await self.run_test(
-            ["#2", "#4", "#5"],
-            [
-                ([11.0, 13.0, 15.0], 13.0),
-                ([None, 13.0, 19.0], 16.0),
-                ([12.2, None, 22.2], 17.2),
-                ([16.5, 19.5, None], 18.0),
-                ([None, 13.0, None], 13.0),
-                ([None, None, None], 0.0),
-            ],
-        )
-
-
 class TestConstantValue:
     """Tests for the constant value step."""
 
     async def test_constant_value(self) -> None:
         """Test using constant values in formulas."""
-
-        channel_1 = Broadcast[Sample[Quantity]]("channel_1")
-        channel_2 = Broadcast[Sample[Quantity]]("channel_2")
+        channel_1 = Broadcast[Sample[Quantity]](name="channel_1")
+        channel_2 = Broadcast[Sample[Quantity]](name="channel_2")
 
         sender_1 = channel_1.new_sender()
         sender_2 = channel_2.new_sender()
 
         builder = FormulaBuilder("test_constant_value", create_method=Quantity)
-        builder.push_metric("channel_1", channel_1.new_receiver(), False)
+        builder.push_metric(
+            "channel_1", channel_1.new_receiver(), nones_are_zeros=False
+        )
         builder.push_oper("+")
         builder.push_constant(2.0)
         builder.push_oper("*")
-        builder.push_metric("channel_2", channel_2.new_receiver(), False)
+        builder.push_metric(
+            "channel_2", channel_2.new_receiver(), nones_are_zeros=False
+        )
 
         engine = builder.build()
 
@@ -672,12 +784,16 @@ class TestConstantValue:
 
         builder = FormulaBuilder("test_constant_value", create_method=Quantity)
         builder.push_oper("(")
-        builder.push_metric("channel_1", channel_1.new_receiver(), False)
+        builder.push_metric(
+            "channel_1", channel_1.new_receiver(), nones_are_zeros=False
+        )
         builder.push_oper("+")
         builder.push_constant(2.0)
         builder.push_oper(")")
         builder.push_oper("*")
-        builder.push_metric("channel_2", channel_2.new_receiver(), False)
+        builder.push_metric(
+            "channel_2", channel_2.new_receiver(), nones_are_zeros=False
+        )
 
         engine = builder.build()
 
@@ -698,16 +814,20 @@ class TestClipper:
 
     async def test_clipper(self) -> None:
         """Test the usage of clipper in formulas."""
-        channel_1 = Broadcast[Sample[Quantity]]("channel_1")
-        channel_2 = Broadcast[Sample[Quantity]]("channel_2")
+        channel_1 = Broadcast[Sample[Quantity]](name="channel_1")
+        channel_2 = Broadcast[Sample[Quantity]](name="channel_2")
 
         sender_1 = channel_1.new_sender()
         sender_2 = channel_2.new_sender()
 
         builder = FormulaBuilder("test_clipper", create_method=Quantity)
-        builder.push_metric("channel_1", channel_1.new_receiver(), False)
+        builder.push_metric(
+            "channel_1", channel_1.new_receiver(), nones_are_zeros=False
+        )
         builder.push_oper("+")
-        builder.push_metric("channel_2", channel_2.new_receiver(), False)
+        builder.push_metric(
+            "channel_2", channel_2.new_receiver(), nones_are_zeros=False
+        )
         builder.push_clipper(0.0, 100.0)
         engine = builder.build()
 
@@ -728,9 +848,13 @@ class TestClipper:
 
         builder = FormulaBuilder("test_clipper", create_method=Quantity)
         builder.push_oper("(")
-        builder.push_metric("channel_1", channel_1.new_receiver(), False)
+        builder.push_metric(
+            "channel_1", channel_1.new_receiver(), nones_are_zeros=False
+        )
         builder.push_oper("+")
-        builder.push_metric("channel_2", channel_2.new_receiver(), False)
+        builder.push_metric(
+            "channel_2", channel_2.new_receiver(), nones_are_zeros=False
+        )
         builder.push_oper(")")
         builder.push_clipper(0.0, 100.0)
         engine = builder.build()
@@ -756,16 +880,20 @@ class TestFormulaOutputTyping:
 
     async def test_types(self) -> None:
         """Test the typing of the output of formulas."""
-        channel_1 = Broadcast[Sample[Power]]("channel_1")
-        channel_2 = Broadcast[Sample[Power]]("channel_2")
+        channel_1 = Broadcast[Sample[Power]](name="channel_1")
+        channel_2 = Broadcast[Sample[Power]](name="channel_2")
 
         sender_1 = channel_1.new_sender()
         sender_2 = channel_2.new_sender()
 
         builder = FormulaBuilder("test_typing", create_method=Power.from_watts)
-        builder.push_metric("channel_1", channel_1.new_receiver(), False)
+        builder.push_metric(
+            "channel_1", channel_1.new_receiver(), nones_are_zeros=False
+        )
         builder.push_oper("+")
-        builder.push_metric("channel_2", channel_2.new_receiver(), False)
+        builder.push_metric(
+            "channel_2", channel_2.new_receiver(), nones_are_zeros=False
+        )
         engine = builder.build()
 
         results_rx = engine.new_receiver()
@@ -783,11 +911,11 @@ class TestFromReceiver:
 
     async def test_from_receiver(self) -> None:
         """Test creating a formula engine from a receiver."""
-        channel = Broadcast[Sample[Power]]("channel_1")
+        channel = Broadcast[Sample[Power]](name="channel_1")
         sender = channel.new_sender()
 
         builder = FormulaBuilder("test_from_receiver", create_method=Power.from_watts)
-        builder.push_metric("channel_1", channel.new_receiver(), False)
+        builder.push_metric("channel_1", channel.new_receiver(), nones_are_zeros=False)
         engine = builder.build()
 
         engine_from_receiver = FormulaEngine.from_receiver(

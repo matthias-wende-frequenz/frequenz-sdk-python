@@ -1,13 +1,13 @@
 # License: MIT
 # Copyright © 2022 Frequenz Energy-as-a-Service GmbH
 
-"""Test for Config"""
+"""Test for Config."""
 import pathlib
 import re
 
 # pylint: disable = no-name-in-module
 import tomllib
-from typing import Any, Dict, List, Optional, Set
+from typing import Any
 
 import pytest
 from pydantic import BaseModel, StrictBool, StrictFloat, StrictInt
@@ -16,14 +16,14 @@ from frequenz.sdk.config import Config
 
 
 class Item(BaseModel):
-    """Test item"""
+    """Test item."""
 
     item_id: int
     name: str
 
 
 class TestConfig:
-    """Test for Config"""
+    """Test for Config."""
 
     conf_path = "sdk/config.toml"
     conf_content = """
@@ -61,7 +61,7 @@ class TestConfig:
             return tomllib.load(file)
 
     def test_get(self, conf_vars: dict[str, Any]) -> None:
-        """Test get function"""
+        """Test get function."""
         config = Config(conf_vars=conf_vars)
 
         assert config.get("logging_lvl") == "DEBUG"
@@ -70,7 +70,7 @@ class TestConfig:
         assert config.get("var2", default=0) == 0
 
     def test_getitem(self, conf_vars: dict[str, Any]) -> None:
-        """Test getitem function"""
+        """Test getitem function."""
         config = Config(conf_vars=conf_vars)
 
         assert config["logging_lvl"] == "DEBUG"
@@ -79,7 +79,7 @@ class TestConfig:
             assert config["var2"]
 
     def test_contains(self, conf_vars: dict[str, Any]) -> None:
-        """Test contains function"""
+        """Test contains function."""
         config = Config(conf_vars=conf_vars)
 
         assert "logging_lvl" in config
@@ -92,32 +92,31 @@ class TestConfig:
             ("logging_lvl", str, "DEBUG"),
             ("var_int", int, 5),
             ("var_int", StrictInt, 5),
+            ("var_int", StrictFloat, 5.0),
             ("var_int", float, 5.0),
             ("var_float", float, 3.14),
             ("var_float", StrictFloat, 3.14),
-            ("var_float", int, 3),
             ("var_bool", int, 1),
             ("var_bool", float, 1.0),
             ("var_bool", bool, True),
             ("var1", bool, 1),
             ("var_bool", StrictBool, True),
-            ("list_int", List[int], [1, 2, 3]),
-            ("list_int", List[StrictInt], [1, 2, 3]),
-            ("list_float", List[int], [1, 2, 3]),
-            ("list_int", List[float], [1.0, 2.0, 3.0]),
-            ("list_float", List[float], [1, 2.0, 3.5]),
-            ("list_non_strict_bool", List[bool], 2 * [False] + 2 * [True]),
-            ("list_non_strict_bool", List[str], ["false", "0", "true", "1"]),
-            ("item_data", List[Item], [Item(item_id=1, name="My Item")]),
-            ("dict_str_int", Dict[str, int], {"a": 1, "b": 2, "c": 3}),
-            ("var_none", Optional[float], None),
+            ("list_int", list[int], [1, 2, 3]),
+            ("list_int", list[StrictInt], [1, 2, 3]),
+            ("list_int", list[StrictFloat], [1.0, 2.0, 3.0]),
+            ("list_int", list[float], [1.0, 2.0, 3.0]),
+            ("list_float", list[float], [1, 2.0, 3.5]),
+            ("list_non_strict_bool", list[bool], 2 * [False] + 2 * [True]),
+            ("list_non_strict_bool", list[str], ["false", "0", "true", "1"]),
+            ("item_data", list[Item], [Item(item_id=1, name="My Item")]),
+            ("dict_str_int", dict[str, int], {"a": 1, "b": 2, "c": 3}),
+            ("var_none", float | None, None),
         ],
     )
     def test_get_as_success(
         self, key: str, expected_type: Any, value: Any, conf_vars: dict[str, Any]
     ) -> None:
-        """Test get_as function with proper arguments"""
-
+        """Test get_as function with proper arguments."""
         config = Config(conf_vars=conf_vars)
         result = config.get_as(key, expected_type)
         assert result == value
@@ -125,18 +124,18 @@ class TestConfig:
     @pytest.mark.parametrize(
         "key, expected_type",
         [
+            ("var_float", int),
             ("var_float", StrictInt),
-            ("var_int", StrictFloat),
             ("var1", StrictBool),
-            ("list_float", List[StrictInt]),
-            ("list_int", List[StrictFloat]),
-            ("list_non_strict_bool", List[int]),
+            ("list_float", list[StrictInt]),
+            ("list_non_strict_bool", list[int]),
+            ("list_float", list[int]),
         ],
     )
     def test_get_as_validation_error(
         self, key: str, expected_type: Any, conf_vars: dict[str, Any]
     ) -> None:
-        """Test get_as function which raise ValidationError"""
+        """Test get_as function which raise ValidationError."""
         config = Config(conf_vars=conf_vars)
 
         err_msg = (
@@ -151,7 +150,7 @@ class TestConfig:
         "key_prefix, expected_values_type, value",
         [
             ("my_dict_", str, {"key1": "value1"}),
-            ("my_dict2_", Set[int], {"key1": {1, 2, 3}, "key2": {3}}),
+            ("my_dict2_", set[int], {"key1": {1, 2, 3}, "key2": {3}}),
         ],
     )
     def test_get_dict_values_success(
@@ -161,8 +160,7 @@ class TestConfig:
         value: Any,
         conf_vars: dict[str, Any],
     ) -> None:
-        """Test get_as function with proper arguments"""
-
+        """Test get_as function with proper arguments."""
         config = Config(conf_vars=conf_vars)
         result = config.get_dict(key_prefix, expected_values_type)
         assert result == value
@@ -172,14 +170,13 @@ class TestConfig:
         [
             ("my_dict_", int),
             ("my_dict2_", int),
-            ("my_dict3_", Set[int]),
+            ("my_dict3_", set[int]),
         ],
     )
     def test_get_dict_success(
         self, key_prefix: str, expected_values_type: Any, conf_vars: dict[str, Any]
     ) -> None:
-        """Test get_as function with proper arguments"""
-
+        """Test get_as function with proper arguments."""
         config = Config(conf_vars=conf_vars)
 
         err_msg_re = (

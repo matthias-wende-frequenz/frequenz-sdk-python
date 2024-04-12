@@ -3,7 +3,6 @@
 
 """Tests for the `SerializableRingBuffer` class."""
 
-from __future__ import annotations
 
 import random
 from datetime import datetime, timedelta, timezone
@@ -30,7 +29,7 @@ def load_dump_test(dumped: rb.OrderedRingBuffer[Any], path: str) -> None:
     # Fill with data so we have something to compare
     # Avoiding .update() because it takes very long for 40k entries
     for i in range(size):
-        dumped[i] = i
+        dumped._buffer[i] = i  # pylint: disable=protected-access
 
     # But use update a bit so the timestamp and gaps are initialized
     for i in range(0, size, 100):
@@ -53,9 +52,9 @@ def load_dump_test(dumped: rb.OrderedRingBuffer[Any], path: str) -> None:
     np.testing.assert_equal(dumped[:], loaded[:])
 
     # pylint: disable=protected-access
-    assert dumped._datetime_oldest == loaded._datetime_oldest
+    assert dumped._timestamp_oldest == loaded._timestamp_oldest
     # pylint: disable=protected-access
-    assert dumped._datetime_newest == loaded._datetime_newest
+    assert dumped._timestamp_newest == loaded._timestamp_newest
     # pylint: disable=protected-access
     assert len(dumped._gaps) == len(loaded._gaps)
     # pylint: disable=protected-access
