@@ -205,35 +205,65 @@ class ShiftingMatryoshka(BaseAlgorithm):
 
         return target_power, Bounds[Power](lower=lower_bound, upper=upper_bound)
 
-    def _validate_component_ids(
+    def _check_overlapping_buckets(
+        self,
+        component_ids: frozenset[ComponentId],
+    ) -> None:
+        """Check if any existing bucket overlaps with the given component IDs.
+
+        Args:
+            component_ids: The component IDs to check.
+
+        Raises:
+            NotImplementedError: When the component IDs overlap with an existing
+                bucket.
+        """
+        if component_ids in self._component_buckets:
+            return
+        for bucket in self._component_buckets:
+            if any(component_id in bucket for component_id in component_ids):
+                comp_ids = ", ".join(map(str, sorted(component_ids)))
+                raise NotImplementedError(
+                    f"PowerManagingActor: {comp_ids} are already part of another "
+                    + "bucket.  Overlapping buckets are not yet supported."
+                )
+
+    def _have_system_bounds(
         self,
         component_ids: frozenset[ComponentId],
         proposal: Proposal | None,
         system_bounds: SystemBounds,
     ) -> bool:
-        if component_ids not in self._component_buckets:
-            # if there are no previous proposals and there are no system bounds, then
-            # don't calculate a target power and fail the validation.
-            if (
-                system_bounds.inclusion_bounds is None
-                and system_bounds.exclusion_bounds is None
-            ):
-                if proposal is not None:
-                    _logger.warning(
-                        "PowerManagingActor: No system bounds available for component "
-                        + "IDs %s, but a proposal was given.  The proposal will be "
-                        + "ignored.",
-                        component_ids,
-                    )
-                return False
+        """Check if system bounds are available.
 
-            for bucket in self._component_buckets:
-                if any(component_id in bucket for component_id in component_ids):
-                    comp_ids = ", ".join(map(str, sorted(component_ids)))
-                    raise NotImplementedError(
-                        f"PowerManagingActor: {comp_ids} are already part of another "
-                        + "bucket.  Overlapping buckets are not yet supported."
-                    )
+        If not, and no target power has been sent for these components yet, the
+        proposal has already been stored and will be processed once bounds become
+        available via the bounds tracker.
+
+        If bounds disappear after a target power has been sent, calculations must
+        continue so the existing target can be reset to a safe value.
+
+        Args:
+            component_ids: The component IDs to check.
+            proposal: The proposal that was stored.
+            system_bounds: The system bounds for the components.
+
+        Returns:
+            Whether system bounds are available.
+        """
+        if (
+            system_bounds.inclusion_bounds is None
+            and system_bounds.exclusion_bounds is None
+            and component_ids not in self._target_power
+        ):
+            if proposal is not None:
+                _logger.info(
+                    "PowerManagingActor: No system bounds available yet for "
+                    "component IDs %s. The proposal has been stored and will "
+                    "be processed once bounds are available.",
+                    component_ids,
+                )
+            return False
         return True
 
     @override
@@ -259,9 +289,10 @@ class ShiftingMatryoshka(BaseAlgorithm):
             NotImplementedError: When the proposal contains component IDs that are
                 already part of another bucket.
         """
-        if not self._validate_component_ids(component_ids, proposal, system_bounds):
-            return None
+        # Check for overlapping buckets before storing the proposal.
+        self._check_overlapping_buckets(component_ids)
 
+        # Store the proposal first, so it's available when bounds arrive later.
         if proposal is not None:
             bucket = self._component_buckets.setdefault(component_ids, set())
             if proposal in bucket:
@@ -274,6 +305,11 @@ class ShiftingMatryoshka(BaseAlgorithm):
                 bucket.add(proposal)
             elif not bucket:
                 del self._component_buckets[component_ids]
+
+        # If bounds aren't available yet, skip power calculation. The stored
+        # proposal will be picked up when the bounds tracker delivers bounds.
+        if not self._have_system_bounds(component_ids, proposal, system_bounds):
+            return None
 
         target_power, _ = self._calc_targets(component_ids, system_bounds)
 
