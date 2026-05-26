@@ -524,3 +524,64 @@ async def test_matryoshka_none_proposals() -> None:
         expected=20.0,
         batteries=overlapping_batteries,
     )
+
+
+async def test_first_proposal_before_bounds_is_not_dropped() -> None:
+    """Regression test for issue #1404.
+
+    When the very first proposal for a set of components arrives before the
+    `PowerManagingActor` has received any system bounds (so they are still the
+    `None/None` placeholder created by `_add_system_bounds_tracker`), the
+    algorithm must:
+
+    - not raise,
+    - return `None` (no target power can be calculated yet),
+    - but still store the proposal so that it is applied when bounds eventually
+      arrive via the bounds tracker (which calls `calculate_target_power`
+      with `proposal=None`).
+    """
+    batteries = frozenset({ComponentId(2), ComponentId(5)})
+
+    # Placeholder bounds as created by `PowerManagingActor._add_system_bounds_tracker`
+    # before the bounds tracker has produced any real value.
+    placeholder_bounds = _base_types.SystemBounds(
+        timestamp=datetime.now(tz=timezone.utc),
+        inclusion_bounds=None,
+        exclusion_bounds=None,
+    )
+    real_bounds = _base_types.SystemBounds(
+        timestamp=datetime.now(tz=timezone.utc),
+        inclusion_bounds=timeseries.Bounds(
+            lower=Power.from_watts(-200.0), upper=Power.from_watts(200.0)
+        ),
+        exclusion_bounds=timeseries.Bounds(lower=Power.zero(), upper=Power.zero()),
+    )
+
+    algorithm = Matryoshka(
+        max_proposal_age=timedelta(seconds=60.0), default_power=DefaultPower.ZERO
+    )
+
+    first_proposal = Proposal(
+        component_ids=batteries,
+        source_id="actor-1",
+        preferred_power=Power.from_watts(25.0),
+        bounds=timeseries.Bounds(
+            Power.from_watts(25.0), Power.from_watts(50.0)
+        ),
+        priority=1,
+        creation_time=asyncio.get_event_loop().time(),
+    )
+
+    # 1. Proposal arrives before bounds: no target power can be computed, but the
+    #    proposal must be persisted in the algorithm's bucket.
+    tgt = algorithm.calculate_target_power(batteries, first_proposal, placeholder_bounds)
+    assert tgt is None
+    # pylint: disable=protected-access
+    assert batteries in algorithm._component_buckets
+    assert first_proposal in algorithm._component_buckets[batteries]
+    # pylint: enable=protected-access
+
+    # 2. Bounds arrive: the actor invokes `calculate_target_power` with no new
+    #    proposal. The previously stored proposal must now produce a target power.
+    tgt = algorithm.calculate_target_power(batteries, None, real_bounds)
+    assert tgt == Power.from_watts(25.0)
