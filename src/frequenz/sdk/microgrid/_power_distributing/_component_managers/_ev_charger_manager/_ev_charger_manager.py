@@ -116,34 +116,63 @@ class EVChargerManager(ComponentManager):
             )
         }
 
-    def _allocate_new_ev(self, component_id: ComponentId) -> dict[ComponentId, Power]:
-        """Allocate power to a newly connected EV charger.
+    def _redistribute_power(self) -> dict[ComponentId, Power]:
+        """Distribute target power across connected EV chargers.
 
-        Args:
-            component_id: ID of the EV charger to allocate power to.
+        The target power is distributed equally among connected chargers while
+        respecting each charger's power bounds. Any excess from chargers capped by
+        their upper bound is redistributed among the remaining chargers.
 
         Returns:
-            A dictionary containing updated power allocations for the EV chargers.
+            Updated power allocations for chargers whose target allocation changed.
         """
-        available_power = (
-            self._target_power - self._evc_states.get_total_allocated_power()
-        )
-        voltage = self._voltage_cache.get().min()
-        if voltage is None:
-            _logger.warning(
-                "Voltage data is not available. Cannot allocate power to EV charger %s",
-                component_id,
+        connected_states = [
+            evc for evc in self._evc_states.values() if evc.last_data.is_ev_connected()
+        ]
+
+        if not connected_states:
+            return {
+                evc.component_id: Power.zero()
+                for evc in self._evc_states.values()
+                if evc.last_allocation > Power.zero()
+            }
+
+        total_target = max(self._target_power, Power.zero()).as_watts()
+        allocations = {
+            evc.component_id: 0.0 for evc in connected_states
+        }
+        remaining_ids = {evc.component_id for evc in connected_states}
+        upper_bounds = {
+            evc.component_id: max(
+                0.0, evc.last_data.active_power_inclusion_upper_bound
             )
-            return {}
-        initial_power = voltage * self._config.initial_current * 3.0
-        if available_power > initial_power:
-            return {component_id: initial_power}
+            for evc in connected_states
+        }
 
-        min_power = voltage * self._config.min_current * 3.0
-        if available_power > min_power:
-            return {component_id: min_power}
+        while remaining_ids and total_target > 0.0:
+            fair_share = total_target / len(remaining_ids)
+            progress = False
+            for component_id in tuple(remaining_ids):
+                allocatable = min(fair_share, upper_bounds[component_id])
+                allocations[component_id] += allocatable
+                total_target -= allocatable
+                upper_bounds[component_id] -= allocatable
+                progress = progress or allocatable > 0.0
+                if is_close_to_zero(upper_bounds[component_id]):
+                    remaining_ids.remove(component_id)
+            if not progress:
+                break
 
-        return {}
+        target_power_changes: dict[ComponentId, Power] = {}
+        connected_ids = {evc.component_id for evc in connected_states}
+        for evc in self._evc_states.values():
+            target_power = Power.from_watts(allocations.get(evc.component_id, 0.0))
+            if evc.component_id not in connected_ids:
+                target_power = Power.zero()
+            if target_power != evc.last_allocation:
+                target_power_changes[evc.component_id] = target_power
+
+        return target_power_changes
 
     def _act_on_new_data(self, ev_data: EVChargerData) -> dict[ComponentId, Power]:
         """Act on new data from an EV charger.
