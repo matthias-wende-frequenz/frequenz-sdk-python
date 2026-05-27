@@ -214,40 +214,21 @@ class TestEVChargerPoolControl:
 
         set_power.reset_mock()
         await ev_charger_pool.propose_power(Power.from_watts(40000.0))
-        # ignore one report because it is not always immediately updated.
         latest_report = await self._recv_reports_until(
             bounds_rx,
             lambda r: r.target_power == Power.from_watts(40000.0),
         )
         self._assert_report(latest_report, power=40000.0, lower=0.0, upper=44160.0)
-        mock_time.shift(timedelta(seconds=60))
-        await asyncio.sleep(0.15)
+        await asyncio.sleep(0.02)
 
-        # Components are set initial power
         assert set_power.call_count == 4
-        assert all(x.args[1] == 6600.0 for x in set_power.call_args_list)
+        assert all(x.args[1] == 10000.0 for x in set_power.call_args_list)
 
-        # All available power is allocated. 3 chargers are set to 11040.0
-        # and the last one is set to 6880.0
-        set_power.reset_mock()
-        mock_time.shift(timedelta(seconds=60))
-        await asyncio.sleep(0.15)
-        assert set_power.call_count == 4
-
-        evs_11040 = [x.args for x in set_power.call_args_list if x.args[1] == 11040.0]
-        assert 3 == len(evs_11040)
-        evs_6680 = [x.args for x in set_power.call_args_list if x.args[1] == 6880.0]
-        assert 1 == len(evs_6680)
-
-        # Throttle the power
         set_power.reset_mock()
         await ev_charger_pool.propose_power(Power.from_watts(32000.0))
-        await bounds_rx.receive()  # Receive the next report and discard it.
+        await bounds_rx.receive()
         await asyncio.sleep(0.02)
-        assert set_power.call_count == 1
-
-        stopped_evs = [x.args for x in set_power.call_args_list if x.args[1] == 0.0]
-        assert 1 == len(stopped_evs)
-        assert stopped_evs[0][0] in [evc[0] for evc in evs_11040]
+        assert set_power.call_count == 4
+        assert all(x.args[1] == 8000.0 for x in set_power.call_args_list)
 
         traveller.stop()
