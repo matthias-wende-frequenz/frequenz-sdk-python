@@ -114,7 +114,7 @@ class _DataPipeline:  # pylint: disable=too-many-instance-attributes
             self._channel_registry,
             api_power_request_timeout=api_power_request_timeout,
             power_manager_algorithm=PowerManagerAlgorithm.MATRYOSHKA,
-            default_power=DefaultPower.MAX,
+            default_power=DefaultPower.ZERO,
             component_class=EvCharger,
         )
         self._pv_power_wrapper = PowerWrapper(
