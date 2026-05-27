@@ -225,6 +225,13 @@ class EVChargerManager(ComponentManager):
             if selected_from(selected, ev_charger_data_rx):
                 evc_data = selected.message
                 if evc_data.component_id not in self._evc_states:
+                    # First time we see this charger: record its state but do
+                    # not push any setpoint. The microgrid API may reject a 0
+                    # write if the charger's inclusion lower bound is > 0 (EV
+                    # already plugged in), and there is no user request driving
+                    # this event. Any subsequent legitimate trigger (target
+                    # power, connection change, significant bounds change) will
+                    # invoke `_redistribute_power()` and set the correct value.
                     self._evc_states.add_evc(
                         EvcState(
                             component_id=evc_data.component_id,
@@ -233,10 +240,7 @@ class EVChargerManager(ComponentManager):
                         )
                     )
                     self._evc_states.get(evc_data.component_id).update_state(evc_data)
-                    # Explicitly zero out newly observed chargers to ensure
-                    # a known initial state.
-                    target_power_changes = {evc_data.component_id: Power.zero()}
-                    target_power_changes.update(self._redistribute_power())
+                    target_power_changes = self._redistribute_power()
                 else:
                     evc_state = self._evc_states.get(evc_data.component_id)
                     previous_data = evc_state.last_data
@@ -276,7 +280,14 @@ class EVChargerManager(ComponentManager):
                 result = await self._set_api_power(
                     api, target_power_changes, self._api_power_request_timeout
                 )
-                await self._results_sender.send(result)
+                # Only emit a Result when this loop iteration was triggered by
+                # a target_power request. Data-driven reallocations (new
+                # charger observed, connection change, bounds change) are not
+                # responses to a `distribute_power()` call, and emitting a
+                # Result for them confuses `PowerManagingActor`, which
+                # correlates results to its own outstanding requests.
+                if is_target_power_event:
+                    await self._results_sender.send(result)
             elif is_target_power_event:
                 # Target power request produced no allocation changes — send a
                 # result immediately so callers don't hang.
