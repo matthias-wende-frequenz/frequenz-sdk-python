@@ -6,7 +6,7 @@
 
 ## Upgrading
 
-<!-- Here goes notes on how to upgrade from previous versions, including deprecations and what they should be replaced with -->
+* The default fallback power for EV chargers (used when all proposals are cleared) changed from `DefaultPower.MAX` to `DefaultPower.ZERO`. Calling `EVChargerPool.propose_power(None)` (or letting all proposals expire) now drives the chargers to 0 W instead of the system upper bound. Callers that relied on the previous behaviour must explicitly propose the maximum power.
 
 ## New Features
 
@@ -14,4 +14,4 @@
 
 ## Bug Fixes
 
-<!-- Here goes notable bug fixes that are worth a special mention or explanation -->
+* Clearing the last EV charger proposal no longer makes the pool jump to the maximum system power; it now releases the chargers to 0 W, matching the documented "release control" semantics of `propose_power(None)`.
