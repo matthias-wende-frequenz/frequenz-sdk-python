@@ -257,9 +257,11 @@ class TestEVChargerPoolControl:
 
         self._assert_report(latest_report, power=None, lower=0.0, upper=44160.0)
 
-        # Check that chargers are initialized to Power.zero()
-        assert set_power.call_count == 4
-        assert all(x.args[1] == 0.0 for x in set_power.call_args_list)
+        # No setpoint is written before any user request: the manager only
+        # records charger state on first observation, it does not blast a 0 W
+        # write (which the API may reject if the inclusion lower bound is
+        # non-zero, and which would in any case be an unsolicited setpoint).
+        assert set_power.call_count == 0
 
         set_power.reset_mock()
         await ev_charger_pool.propose_power(Power.from_watts(40000.0))
@@ -321,10 +323,13 @@ class TestEVChargerPoolControl:
             bounds_rx,
             lambda x: x.bounds is not None and x.bounds.upper.as_watts() == 22080.0,
         )
+        # Aggregate lower bound is the smallest per-charger minimum (not the
+        # sum): the pool can satisfy any request down to one charger's minimum
+        # by powering only a subset.
         self._assert_report(
             latest_report,
             power=None,
-            lower=2 * lower_bound,
+            lower=lower_bound,
             upper=22080.0,
         )
 
@@ -332,13 +337,36 @@ class TestEVChargerPoolControl:
         await ev_charger_pool.propose_power(Power.from_watts(target_power))
         await asyncio.sleep(0.02)
 
-        actual_allocations = {
+        # A charger that is not explicitly written keeps its previous setpoint
+        # (which is 0 since startup no longer blasts a zero write — see fix
+        # #1). Treat "not called" as "allocated 0" for assertion purposes.
+        called_allocations = {
             call.args[0]: call.args[1] for call in set_power.call_args_list
         }
-        for evc_id in connected_ids:
-            assert (
-                actual_allocations[evc_id] in (0.0, lower_bound)
-                or actual_allocations[evc_id] > lower_bound
+        actual_allocations = {
+            evc_id: called_allocations.get(evc_id, 0.0) for evc_id in connected_ids
+        }
+        # Each charger must receive either 0 or a value >= its minimum bound.
+        for evc_id, allocation in actual_allocations.items():
+            assert allocation == 0.0 or allocation >= lower_bound, (
+                f"charger {evc_id} got {allocation}, expected 0 or >= {lower_bound}"
+            )
+        # The sum of allocations must not exceed the requested target.
+        total = sum(actual_allocations.values())
+        assert total <= target_power + 1e-6, (
+            f"total allocation {total} exceeds target {target_power}"
+        )
+        # When the target is below the sum of minimums, at least one charger
+        # must be dropped (allocated 0) so the others can meet their minimum.
+        if target_power < 2 * lower_bound:
+            assert 0.0 in actual_allocations.values(), (
+                "expected at least one charger to be dropped when target "
+                f"{target_power} < sum of minimums {2 * lower_bound}"
+            )
+            # The non-dropped charger(s) must receive at least the minimum.
+            assert any(
+                allocation >= lower_bound
+                for allocation in actual_allocations.values()
             )
 
     async def test_zero_minimum_power_distribution_is_unchanged(
@@ -405,14 +433,21 @@ class TestEVChargerPoolControl:
             bounds_rx,
             lambda x: x.bounds is not None and x.bounds.upper.as_watts() == 17040.0,
         )
-        self._assert_report(latest_report, power=None, lower=7000.0, upper=17040.0)
+        # Aggregate lower bound is min(per-charger lower) = 2000, not the sum.
+        self._assert_report(latest_report, power=None, lower=2000.0, upper=17040.0)
 
         set_power.reset_mock()
         await ev_charger_pool.propose_power(Power.from_watts(6000.0))
         await asyncio.sleep(0.02)
 
-        actual_allocations = {
+        # Missing entries mean "not written" — equivalent to 0 since the
+        # manager no longer blasts a zero on startup (fix #1).
+        called_allocations = {
             call.args[0]: call.args[1] for call in set_power.call_args_list
+        }
+        actual_allocations = {
+            evc_a: called_allocations.get(evc_a, 0.0),
+            evc_b: called_allocations.get(evc_b, 0.0),
         }
         assert (
             actual_allocations[evc_a] in (0.0, 2000.0)
