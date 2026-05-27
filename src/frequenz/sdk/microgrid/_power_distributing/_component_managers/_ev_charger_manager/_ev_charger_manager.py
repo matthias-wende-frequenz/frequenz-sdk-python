@@ -174,77 +174,15 @@ class EVChargerManager(ComponentManager):
 
         return target_power_changes
 
-    def _act_on_new_data(self, ev_data: EVChargerData) -> dict[ComponentId, Power]:
-        """Act on new data from an EV charger.
-
-        Args:
-            ev_data: New data from the EV charger.
-
-        Returns:
-            A dictionary containing updated power allocations for the EV chargers.
-        """
-        component_id = ev_data.component_id
-        ev_connected = ev_data.is_ev_connected()
-        ev_previously_connected = self._evc_states.get(
-            component_id
-        ).last_data.is_ev_connected()
-
-        # if EV is just connected, try to set config.initial_current, throttle other
-        # EVs if necessary
-        ev_newly_connected = ev_connected and not ev_previously_connected
-        if ev_newly_connected:
-            _logger.info("New EV connected to EV charger %s", component_id)
-            return self._allocate_new_ev(component_id)
-
-        # if EV is disconnected, set limit to 0.0.  redistribution to other EVs will
-        # happen separately, when possible.
-        if not ev_connected:
-            if ev_previously_connected:
-                _logger.info("EV disconnected from EV charger %s", component_id)
-            if self._evc_states.get(component_id).last_allocation > Power.zero():
-                return {component_id: Power.zero()}
-
-        # else if last throttling was less than 'increase_power_interval', do nothing.
-        now = datetime.now(tz=timezone.utc)
-        last_throttling_time = self._evc_states.get(component_id).last_reallocation_time
-        if last_throttling_time is not None:
-            dur = now - last_throttling_time
-            if dur < self._config.increase_power_interval:
-                return {}
-
-        # if ev's target power was previously set to zero, treat it like it is newly
-        # connected
-        evc = self._evc_states.get(component_id)
-        if is_close_to_zero(evc.last_allocation.as_watts()):
-            return self._allocate_new_ev(component_id)
-
-        # if the ev charger is already allocated the max power, do nothing
-        allottable_power = Power.from_watts(
-            evc.last_data.active_power_inclusion_upper_bound
-            - evc.last_allocation.as_watts()
-        )
-        available_power = (
-            self._target_power - self._evc_states.get_total_allocated_power()
-        )
-        allottable_power = min(allottable_power, available_power)
-
-        if (
-            is_close_to_zero(allottable_power.as_watts())
-            or allottable_power < Power.zero()
-        ):
-            return {}
-
-        target_power = min(
-            evc.last_allocation + allottable_power,
-            Power.from_watts(evc.last_data.active_power_inclusion_upper_bound),
-        )
-        _logger.debug(
-            "Increasing power to EV charger %s from %s to %s",
-            component_id,
-            evc.last_allocation,
-            target_power,
-        )
-        return {component_id: target_power}
+    def _has_significant_bound_change(
+        self, previous: EVChargerData, current: EVChargerData
+    ) -> bool:
+        """Check whether EV charger bounds changed enough to trigger redistribution."""
+        previous_upper = previous.active_power_inclusion_upper_bound
+        current_upper = current.active_power_inclusion_upper_bound
+        delta = abs(current_upper - previous_upper)
+        threshold = max(abs(previous_upper), abs(current_upper)) * 0.05
+        return delta > max(100.0, threshold)
 
     async def _run(self) -> None:  # pylint: disable=too-many-locals
         """Run the main event loop of the EV charger manager."""
@@ -257,14 +195,10 @@ class EVChargerManager(ComponentManager):
         async for selected in select(ev_charger_data_rx, target_power_rx):
             target_power_changes = {}
             now = datetime.now(tz=timezone.utc)
+            is_target_power_event = False
 
             if selected_from(selected, ev_charger_data_rx):
                 evc_data = selected.message
-                # If a new ev charger is added, add it to the state tracker, with
-                # now as the last reallocation time and last charging time.
-                #
-                # This means it won't be assigned any power until the reallocation
-                # duration has passed.
                 if evc_data.component_id not in self._evc_states:
                     self._evc_states.add_evc(
                         EvcState(
@@ -276,15 +210,40 @@ class EVChargerManager(ComponentManager):
                             last_charging_time=now,
                         )
                     )
-                    target_power_changes = {evc_data.component_id: Power.zero()}
-
-                # See if the ev charger has room for more power, and if the last
-                # allocation was not in the last reallocation duration.
-                else:
-                    target_power_changes = self._act_on_new_data(evc_data)
                     self._evc_states.get(evc_data.component_id).update_state(evc_data)
+                    # Explicitly zero out newly observed chargers to ensure
+                    # a known initial state.
+                    target_power_changes = {
+                        evc_data.component_id: Power.zero()
+                    }
+                    target_power_changes.update(self._redistribute_power())
+                else:
+                    evc_state = self._evc_states.get(evc_data.component_id)
+                    previous_data = evc_state.last_data
+                    was_connected = previous_data.is_ev_connected()
+                    evc_state.update_state(evc_data)
+                    is_connected = evc_data.is_ev_connected()
+                    connection_changed = was_connected != is_connected
+                    bounds_changed = self._has_significant_bound_change(
+                        previous_data, evc_data
+                    )
+
+                    if connection_changed:
+                        if is_connected:
+                            _logger.info(
+                                "New EV connected to EV charger %s",
+                                evc_data.component_id,
+                            )
+                        else:
+                            _logger.info(
+                                "EV disconnected from EV charger %s",
+                                evc_data.component_id,
+                            )
+                    if connection_changed or bounds_changed:
+                        target_power_changes = self._redistribute_power()
 
             elif selected_from(selected, target_power_rx):
+                is_target_power_event = True
                 self._latest_request = selected.message
                 self._target_power = selected.message.power
                 _logger.debug("New target power: %s", self._target_power)
@@ -292,16 +251,28 @@ class EVChargerManager(ComponentManager):
 
             if target_power_changes:
                 _logger.debug("Setting power to EV chargers: %s", target_power_changes)
-            else:
-                continue
-            for component_id, power in target_power_changes.items():
-                self._evc_states.get(component_id).update_last_allocation(power, now)
-
-            latest_target_powers.update(target_power_changes)
-            result = await self._set_api_power(
-                api, target_power_changes, self._api_power_request_timeout
-            )
-            await self._results_sender.send(result)
+                for component_id, power in target_power_changes.items():
+                    self._evc_states.get(component_id).update_last_allocation(
+                        power, now
+                    )
+                latest_target_powers.update(target_power_changes)
+                result = await self._set_api_power(
+                    api, target_power_changes, self._api_power_request_timeout
+                )
+                await self._results_sender.send(result)
+            elif is_target_power_event:
+                # Target power request produced no allocation changes — send a
+                # result immediately so callers don't hang.
+                allocated = self._evc_states.get_total_allocated_power()
+                excess = max(self._target_power - allocated, Power.zero())
+                await self._results_sender.send(
+                    Success(
+                        succeeded_components=set(),
+                        succeeded_power=allocated,
+                        excess_power=excess,
+                        request=self._latest_request,
+                    )
+                )
 
     async def _set_api_power(
         self,
@@ -362,19 +333,22 @@ class EVChargerManager(ComponentManager):
             failed_components.add(component_id)
             failed_power += target_power_changes[component_id]
 
+        allocated = self._evc_states.get_total_allocated_power()
+        excess = max(self._target_power - allocated, Power.zero())
+
         if failed_components:
             return PartialFailure(
                 failed_components=failed_components,
                 succeeded_components=succeeded_components,
                 failed_power=failed_power,
-                succeeded_power=self._target_power - failed_power,
-                excess_power=Power.zero(),
+                succeeded_power=allocated - failed_power,
+                excess_power=excess,
                 request=self._latest_request,
             )
         return Success(
             succeeded_components=succeeded_components,
-            succeeded_power=self._target_power,
-            excess_power=Power.zero(),
+            succeeded_power=allocated,
+            excess_power=excess,
             request=self._latest_request,
         )
 
