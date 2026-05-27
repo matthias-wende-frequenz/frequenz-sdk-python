@@ -6,11 +6,10 @@
 import asyncio
 import collections.abc
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 
 from frequenz.channels import (
     Broadcast,
-    LatestValueCache,
     Sender,
     merge,
     select,
@@ -19,20 +18,18 @@ from frequenz.channels import (
 from frequenz.client.common.microgrid.components import ComponentId
 from frequenz.client.microgrid import ApiClientError, MicrogridApiClient
 from frequenz.client.microgrid.component import EvCharger
-from frequenz.quantities import Power, Voltage
+from frequenz.quantities import Power
 from typing_extensions import override
 
 from ....._internal._asyncio import run_forever
 from ....._internal._math import is_close_to_zero
-from .....timeseries import Sample3Phase
-from .... import _data_pipeline, connection_manager
+from .... import connection_manager
 from ...._old_component_data import EVChargerData
 from ..._component_pool_status_tracker import ComponentPoolStatusTracker
 from ..._component_status import ComponentPoolStatus, EVChargerStatusTracker
 from ...request import Request
 from ...result import PartialFailure, Result, Success
 from .._component_manager import ComponentManager
-from ._config import EVDistributionConfig
 from ._states import EvcState, EvcStates
 
 _logger = logging.getLogger(__name__)
@@ -61,11 +58,6 @@ class EVChargerManager(ComponentManager):
         self._api_power_request_timeout = api_power_request_timeout
         self._ev_charger_ids = self._get_ev_charger_ids()
         self._evc_states = EvcStates()
-        self._voltage_cache: LatestValueCache[Sample3Phase[Voltage]] = LatestValueCache(
-            _data_pipeline.voltage_per_phase().new_receiver(),
-            unique_id=f"{type(self).__name__}«{hex(id(self))}»:voltage_cache",
-        )
-        self._config = EVDistributionConfig(component_ids=self._ev_charger_ids)
         self._component_pool_status_tracker = ComponentPoolStatusTracker(
             component_ids=self._ev_charger_ids,
             component_status_sender=component_pool_status_sender,
@@ -104,7 +96,6 @@ class EVChargerManager(ComponentManager):
     @override
     async def stop(self) -> None:
         """Stop the ev charger manager."""
-        await self._voltage_cache.stop()
         await self._component_pool_status_tracker.stop()
 
     def _get_ev_charger_ids(self) -> collections.abc.Set[ComponentId]:
@@ -191,10 +182,8 @@ class EVChargerManager(ComponentManager):
             *(EVChargerData.subscribe(api, evc_id) for evc_id in self._ev_charger_ids)
         )
         target_power_rx = self._target_power_channel.new_receiver()
-        latest_target_powers: dict[ComponentId, Power] = {}
         async for selected in select(ev_charger_data_rx, target_power_rx):
             target_power_changes = {}
-            now = datetime.now(tz=timezone.utc)
             is_target_power_event = False
 
             if selected_from(selected, ev_charger_data_rx):
@@ -204,10 +193,7 @@ class EVChargerManager(ComponentManager):
                         EvcState(
                             component_id=evc_data.component_id,
                             last_data=evc_data,
-                            power=Power.zero(),
                             last_allocation=Power.zero(),
-                            last_reallocation_time=now,
-                            last_charging_time=now,
                         )
                     )
                     self._evc_states.get(evc_data.component_id).update_state(evc_data)
@@ -253,9 +239,8 @@ class EVChargerManager(ComponentManager):
                 _logger.debug("Setting power to EV chargers: %s", target_power_changes)
                 for component_id, power in target_power_changes.items():
                     self._evc_states.get(component_id).update_last_allocation(
-                        power, now
+                        power
                     )
-                latest_target_powers.update(target_power_changes)
                 result = await self._set_api_power(
                     api, target_power_changes, self._api_power_request_timeout
                 )

@@ -4,7 +4,6 @@
 """Power distribution state tracking for ev chargers."""
 
 from dataclasses import dataclass
-from datetime import datetime
 from typing import Iterable
 
 from frequenz.client.common.microgrid.components import ComponentId
@@ -23,35 +22,16 @@ class EvcState:
     last_data: EVChargerData
     """The last data received from the EV charger."""
 
-    power: Power
-    """The power currently used by the EV charger."""
-
     last_allocation: Power
     """The last allocation made for the EV."""
 
-    last_reallocation_time: datetime
-    """The last time the ev charger was allocated power.
-
-    Used to make sure we don't allocate power to the ev charger too often.
-    """
-
-    last_charging_time: datetime
-    """The last time the ev charger was charging.
-
-    Used to de-allocate power from the ev charger if it has not been charging
-    for a while.
-    """
-
-    def update_last_allocation(self, allocation: Power, alloc_time: datetime) -> None:
-        """Update the last allocation and related timestamps.
+    def update_last_allocation(self, allocation: Power) -> None:
+        """Update the last allocation.
 
         Args:
-            allocation: The most allocation allocation made for the EV.
-            alloc_time: The time at which the allocation was made.
+            allocation: The most recent allocation made for the EV.
         """
         self.last_allocation = allocation
-        self.last_reallocation_time = alloc_time
-        self.last_charging_time = alloc_time
 
     def update_state(
         self,
@@ -62,11 +42,7 @@ class EvcState:
         Args:
             latest_ev_data: latest ev data from component data stream.
         """
-        self.power = Power.from_watts(latest_ev_data.active_power)
         self.last_data = latest_ev_data
-
-        if self.power > Power.zero():
-            self.last_charging_time = latest_ev_data.timestamp
 
 
 class EvcStates:
@@ -77,13 +53,6 @@ class EvcStates:
     def __init__(self) -> None:
         """Initialize this instance."""
         self._states = {}
-
-    def get_ev_total_used_power(self) -> Power:
-        """Return the total power consumed by all EV Chargers."""
-        total_used = Power.zero()
-        for evc in self._states.values():
-            total_used += evc.power
-        return total_used
 
     def get_total_allocated_power(self) -> Power:
         """Return the total power allocated to all EV Chargers."""

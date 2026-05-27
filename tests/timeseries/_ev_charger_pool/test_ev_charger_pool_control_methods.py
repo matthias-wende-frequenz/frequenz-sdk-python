@@ -14,7 +14,7 @@ import pytest
 import time_machine
 from frequenz.channels import Receiver
 from frequenz.client.microgrid.component import ComponentStateCode
-from frequenz.quantities import Power, Voltage
+from frequenz.quantities import Power
 from pytest_mock import MockerFixture
 
 from frequenz.sdk import microgrid
@@ -24,7 +24,7 @@ from frequenz.sdk.microgrid._power_distributing import ComponentPoolStatus
 from frequenz.sdk.microgrid._power_distributing._component_pool_status_tracker import (
     ComponentPoolStatusTracker,
 )
-from frequenz.sdk.timeseries import ResamplerConfig2, Sample3Phase
+from frequenz.sdk.timeseries import ResamplerConfig2
 from frequenz.sdk.timeseries.ev_charger_pool import EVChargerPoolReport
 
 from ...microgrid.fixtures import _Mocks
@@ -107,16 +107,10 @@ class TestEVChargerPoolControl:
         self,
         mocker: MockerFixture,
     ) -> None:
-        mocker.patch(
-            "frequenz.sdk.microgrid._data_pipeline._DATA_PIPELINE._ev_power_wrapper"
-            "._power_distributing_actor._component_manager._voltage_cache.get",
-            return_value=Sample3Phase(
-                timestamp=datetime.now(tz=timezone.utc),
-                value_p1=Voltage.from_volts(220.0),
-                value_p2=Voltage.from_volts(220.0),
-                value_p3=Voltage.from_volts(220.0),
-            ),
-        )
+        # No patching needed after _voltage_cache was removed from the
+        # EVChargerManager.  The method is kept as a hook for future patches
+        # and to avoid changing callers.
+        pass
 
     async def _init_ev_chargers(self, mocks: _Mocks) -> None:
         now = datetime.now(tz=timezone.utc)
