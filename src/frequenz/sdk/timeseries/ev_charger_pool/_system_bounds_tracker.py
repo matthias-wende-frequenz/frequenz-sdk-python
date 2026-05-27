@@ -59,9 +59,18 @@ class EVCSystemBoundsTracker(BackgroundService):
         """Calculate and send the aggregate system bounds if they have changed."""
         if not self._latest_component_data:
             return
+        # The aggregate inclusion lower bound is the *minimum* per-charger lower
+        # bound, not the sum: the EV charger pool can satisfy any request down to
+        # the smallest individual minimum by powering only a subset of chargers
+        # (the `EVChargerManager._redistribute_power()` allocation drops chargers
+        # whose minimum cannot be met). Summing per-charger minimums would force
+        # Matryoshka to clamp small user requests up to an unreachable aggregate
+        # floor (e.g. 2 chargers at 3.96 kW each would force every non-zero
+        # request up to 7.92 kW). The upper bound is still the sum, since the
+        # pool can deliver up to the sum of all chargers' maximums.
         inclusion_bounds = Bounds(
             lower=Power.from_watts(
-                sum(
+                min(
                     data.active_power_inclusion_lower_bound
                     for data in self._latest_component_data.values()
                 )
