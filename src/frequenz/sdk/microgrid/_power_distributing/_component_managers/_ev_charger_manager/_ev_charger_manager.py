@@ -110,9 +110,9 @@ class EVChargerManager(ComponentManager):
     def _redistribute_power(self) -> dict[ComponentId, Power]:
         """Distribute target power across connected EV chargers.
 
-        The target power is distributed equally among connected chargers while
-        respecting each charger's power bounds. Any excess from chargers capped by
-        their upper bound is redistributed among the remaining chargers.
+        Each connected charger either receives zero power or an allocation within
+        its inclusion bounds. Chargers that cannot be given at least their lower
+        inclusion bound are excluded from the allocation.
 
         Returns:
             Updated power allocations for chargers whose target allocation changed.
@@ -129,27 +129,63 @@ class EVChargerManager(ComponentManager):
             }
 
         total_target = max(self._target_power, Power.zero()).as_watts()
-        allocations = {
-            evc.component_id: 0.0 for evc in connected_states
-        }
-        remaining_ids = {evc.component_id for evc in connected_states}
         upper_bounds = {
-            evc.component_id: max(
-                0.0, evc.last_data.active_power_inclusion_upper_bound
+            evc.component_id: max(0.0, evc.last_data.active_power_inclusion_upper_bound)
+            for evc in connected_states
+        }
+        lower_bounds = {
+            evc.component_id: min(
+                max(0.0, evc.last_data.active_power_inclusion_lower_bound),
+                upper_bounds[evc.component_id],
             )
             for evc in connected_states
         }
 
-        while remaining_ids and total_target > 0.0:
-            fair_share = total_target / len(remaining_ids)
+        included_ids = {
+            evc.component_id
+            for evc in connected_states
+            if upper_bounds[evc.component_id] > 0.0
+        }
+        while included_ids:
+            total_minimum = sum(
+                lower_bounds[component_id] for component_id in included_ids
+            )
+            if total_minimum <= total_target:
+                break
+
+            component_id = max(
+                included_ids,
+                key=lambda candidate: (
+                    lower_bounds[candidate],
+                    upper_bounds[candidate],
+                    candidate,
+                ),
+            )
+            included_ids.remove(component_id)
+
+        allocations = {evc.component_id: 0.0 for evc in connected_states}
+        for component_id in included_ids:
+            allocations[component_id] = lower_bounds[component_id]
+
+        remaining_power = total_target - sum(allocations.values())
+        remaining_ids = {
+            component_id
+            for component_id in included_ids
+            if upper_bounds[component_id] - allocations[component_id] > 0.0
+        }
+
+        while remaining_ids and remaining_power > 0.0:
+            fair_share = remaining_power / len(remaining_ids)
             progress = False
             for component_id in tuple(remaining_ids):
-                allocatable = min(fair_share, upper_bounds[component_id])
+                headroom = upper_bounds[component_id] - allocations[component_id]
+                allocatable = min(fair_share, headroom)
                 allocations[component_id] += allocatable
-                total_target -= allocatable
-                upper_bounds[component_id] -= allocatable
+                remaining_power -= allocatable
                 progress = progress or allocatable > 0.0
-                if is_close_to_zero(upper_bounds[component_id]):
+                if is_close_to_zero(
+                    upper_bounds[component_id] - allocations[component_id]
+                ):
                     remaining_ids.remove(component_id)
             if not progress:
                 break
@@ -199,9 +235,7 @@ class EVChargerManager(ComponentManager):
                     self._evc_states.get(evc_data.component_id).update_state(evc_data)
                     # Explicitly zero out newly observed chargers to ensure
                     # a known initial state.
-                    target_power_changes = {
-                        evc_data.component_id: Power.zero()
-                    }
+                    target_power_changes = {evc_data.component_id: Power.zero()}
                     target_power_changes.update(self._redistribute_power())
                 else:
                     evc_state = self._evc_states.get(evc_data.component_id)
@@ -238,9 +272,7 @@ class EVChargerManager(ComponentManager):
             if target_power_changes:
                 _logger.debug("Setting power to EV chargers: %s", target_power_changes)
                 for component_id, power in target_power_changes.items():
-                    self._evc_states.get(component_id).update_last_allocation(
-                        power
-                    )
+                    self._evc_states.get(component_id).update_last_allocation(power)
                 result = await self._set_api_power(
                     api, target_power_changes, self._api_power_request_timeout
                 )
@@ -336,4 +368,3 @@ class EVChargerManager(ComponentManager):
             excess_power=excess,
             request=self._latest_request,
         )
-
