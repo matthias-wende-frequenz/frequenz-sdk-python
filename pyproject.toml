@@ -211,3 +211,4 @@ ignore_missing_imports = true
 
 [tool.setuptools_scm]
 version_scheme = "post-release"
+fallback_version = "1.0.0rc2207"
