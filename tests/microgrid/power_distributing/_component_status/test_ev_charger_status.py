@@ -54,7 +54,7 @@ class TestEVChargerStatusTracker:
                 await status_receiver.receive()
             ).value == ComponentStatusEnum.NOT_WORKING
 
-            # When an EV is plugged, it is working
+            # When an EV is plugged, it is working.
             await mock_microgrid.mock_client.send(
                 EvChargerDataWrapper(
                     _EV_CHARGER_ID,
@@ -71,7 +71,21 @@ class TestEVChargerStatusTracker:
                 _EV_CHARGER_ID, ComponentStatusEnum.WORKING
             )
 
-            # When an EV is locked, no change in status
+            # When only an EV-side cable state is present, it is still working.
+            await mock_microgrid.mock_client.send(
+                EvChargerDataWrapper(
+                    _EV_CHARGER_ID,
+                    datetime.now(tz=timezone.utc),
+                    active_power=0.0,
+                    states={
+                        ComponentStateCode.READY,
+                        ComponentStateCode.EV_CHARGING_CABLE_LOCKED_AT_EV,
+                    },
+                ).to_samples()
+            )
+            assert await receive_timeout(status_receiver) is Timeout
+
+            # When an EV is locked, no change in status.
             await mock_microgrid.mock_client.send(
                 EvChargerDataWrapper(
                     _EV_CHARGER_ID,
