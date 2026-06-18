@@ -1369,6 +1369,10 @@ class EVChargerData(ComponentData):  # pylint: disable=too-many-instance-attribu
         Returns:
             When the charger is not in an error state, whether an EV is connected to
                 the charger.
+
+            A cable state at the EV side implies the cable is also connected at the
+            station side, so either EV-side or station-side cable states are treated
+            as evidence of a connected EV.
         """
         has_error = ComponentStateCode.ERROR in self.states
         is_authorized = (
@@ -1393,8 +1397,7 @@ class EVChargerData(ComponentData):  # pylint: disable=too-many-instance-attribu
         return (
             not has_error
             and is_authorized
-            and is_connected_at_ev
-            and is_connected_at_station
+            and (is_connected_at_ev or is_connected_at_station)
         )
 
 
