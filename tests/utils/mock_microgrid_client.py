@@ -162,6 +162,7 @@ class MockMicrogridClient:
 
         # Can be overridden in the future
         api.set_component_power_active = AsyncMock(return_value=None)
+        api.add_component_bounds = AsyncMock(return_value=None)
         return api
 
     def _mock_receiver_component_data_samples_stream(

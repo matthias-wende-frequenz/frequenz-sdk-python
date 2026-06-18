@@ -15,11 +15,28 @@ from frequenz.channels import (
     select,
     selected_from,
 )
+from frequenz.channels.timer import SkipMissedAndDrift, Timer
 from frequenz.client.common.microgrid.components import ComponentId
-from frequenz.client.microgrid import ApiClientError, MicrogridApiClient
+from frequenz.client.microgrid import ApiClientError, MicrogridApiClient, Validity
 from frequenz.client.microgrid.component import EvCharger
+from frequenz.client.microgrid.metrics import Bounds, Metric
 from frequenz.quantities import Power
 from typing_extensions import override
+
+_logger = logging.getLogger(__name__)
+
+# EV chargers are controlled by constraining their AC active-power inclusion
+# bounds rather than by writing a direct power setpoint. The microgrid service
+# (nitrogen) continuously relays the effective ``AC_POWER_ACTIVE`` upper bound
+# to the asset, so a direct setpoint would be immediately overwritten by that
+# relay; an upper bound, on the other hand, is honoured.
+#
+# Bounds expire after ``_BOUNDS_VALIDITY``. Unlike an expiring setpoint (which
+# resets the asset to 0 W), an expiring upper bound *removes* the cap and lets
+# the charger draw full power, so the currently-desired caps must be re-asserted
+# well before they lapse.
+_BOUNDS_VALIDITY = Validity.ONE_MINUTE
+_BOUNDS_RENEWAL_INTERVAL = timedelta(seconds=_BOUNDS_VALIDITY.value / 2)
 
 from ....._internal._asyncio import run_forever
 from ....._internal._math import is_close_to_zero
@@ -31,8 +48,6 @@ from ...request import Request
 from ...result import PartialFailure, Result, Success
 from .._component_manager import ComponentManager
 from ._states import EvcState, EvcStates
-
-_logger = logging.getLogger(__name__)
 
 
 class EVChargerManager(ComponentManager):
@@ -70,6 +85,9 @@ class EVChargerManager(ComponentManager):
         self._target_power_tx = self._target_power_channel.new_sender()
         self._task: asyncio.Task[None] | None = None
         self._latest_request: Request = Request(Power.zero(), set())
+        # The per-charger active-power caps (watts) most recently sent to the
+        # API. Used to periodically re-assert the bounds before they expire.
+        self._last_sent_allocations: dict[ComponentId, Power] = {}
 
     @override
     def component_ids(self) -> collections.abc.Set[ComponentId]:
@@ -218,9 +236,25 @@ class EVChargerManager(ComponentManager):
             *(EVChargerData.subscribe(api, evc_id) for evc_id in self._ev_charger_ids)
         )
         target_power_rx = self._target_power_channel.new_receiver()
-        async for selected in select(ev_charger_data_rx, target_power_rx):
+        renewal_timer = Timer(_BOUNDS_RENEWAL_INTERVAL, SkipMissedAndDrift())
+        async for selected in select(ev_charger_data_rx, target_power_rx, renewal_timer):
             target_power_changes = {}
             is_target_power_event = False
+
+            if selected_from(selected, renewal_timer):
+                # Re-assert the currently-desired caps so the bounds do not
+                # lapse (which would uncap the chargers). This is not a response
+                # to a `distribute_power()` call, so no Result is emitted.
+                if self._last_sent_allocations:
+                    _logger.debug(
+                        "Renewing EV charger bounds: %s", self._last_sent_allocations
+                    )
+                    await self._send_api_bounds(
+                        api,
+                        dict(self._last_sent_allocations),
+                        self._api_power_request_timeout,
+                    )
+                continue
 
             if selected_from(selected, ev_charger_data_rx):
                 evc_data = selected.message
@@ -302,6 +336,76 @@ class EVChargerManager(ComponentManager):
                     )
                 )
 
+    async def _send_api_bounds(
+        self,
+        api: MicrogridApiClient,
+        allocations: dict[ComponentId, Power],
+        api_request_timeout: timedelta,
+    ) -> tuple[set[ComponentId], set[ComponentId]]:
+        """Send EV charger active-power upper bounds to the microgrid API.
+
+        Each charger is capped by adding an ``AC_POWER_ACTIVE`` inclusion bound
+        of ``[0, allocation]`` watts. The microgrid service relays this upper
+        bound to the asset; a direct power setpoint would instead be overwritten
+        by that relay, which is why bounds are used here.
+
+        Args:
+            api: The microgrid API client to use for setting the bounds.
+            allocations: Desired per-charger active-power caps (watts, ``>= 0``).
+            api_request_timeout: The timeout for the API request.
+
+        Returns:
+            A tuple ``(succeeded_components, failed_components)`` of the
+                component IDs whose bounds were set successfully and those that
+                failed, respectively.
+        """
+        tasks: dict[ComponentId, asyncio.Task[datetime | None]] = {}
+        for component_id, power in allocations.items():
+            tasks[component_id] = asyncio.create_task(
+                api.add_component_bounds(
+                    component_id,
+                    Metric.AC_POWER_ACTIVE,
+                    [Bounds(lower=0.0, upper=max(0.0, power.as_watts()))],
+                    validity=_BOUNDS_VALIDITY,
+                )
+            )
+        _, pending = await asyncio.wait(
+            tasks.values(),
+            timeout=api_request_timeout.total_seconds(),
+            return_when=asyncio.ALL_COMPLETED,
+        )
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+
+        failed_components: set[ComponentId] = set()
+        succeeded_components: set[ComponentId] = set()
+        for component_id, task in tasks.items():
+            try:
+                task.result()
+            except asyncio.CancelledError:
+                _logger.warning(
+                    "Timeout while setting bounds for EV charger %s", component_id
+                )
+            except ApiClientError as exc:
+                _logger.warning(
+                    "Got a client error while setting bounds for EV charger %s: %s",
+                    component_id,
+                    exc,
+                )
+            except Exception:  # pylint: disable=broad-except
+                _logger.exception(
+                    "Unknown error while setting bounds for EV charger: %s",
+                    component_id,
+                )
+            else:
+                succeeded_components.add(component_id)
+                continue
+
+            failed_components.add(component_id)
+
+        return succeeded_components, failed_components
+
     async def _set_api_power(
         self,
         api: MicrogridApiClient,
@@ -320,45 +424,19 @@ class EVChargerManager(ComponentManager):
             Power distribution result, corresponding to the result of the API
                 request.
         """
-        tasks: dict[ComponentId, asyncio.Task[datetime | None]] = {}
-        for component_id, power in target_power_changes.items():
-            tasks[component_id] = asyncio.create_task(
-                api.set_component_power_active(component_id, power.as_watts())
-            )
-        _, pending = await asyncio.wait(
-            tasks.values(),
-            timeout=api_request_timeout.total_seconds(),
-            return_when=asyncio.ALL_COMPLETED,
+        succeeded_components, failed_components = await self._send_api_bounds(
+            api, target_power_changes, api_request_timeout
         )
-        for task in pending:
-            task.cancel()
-        await asyncio.gather(*pending, return_exceptions=True)
 
-        failed_components: set[ComponentId] = set()
-        succeeded_components: set[ComponentId] = set()
+        # Remember the caps that were applied so they can be re-asserted before
+        # the bounds expire (see ``_BOUNDS_RENEWAL_INTERVAL``).
+        for component_id in succeeded_components:
+            self._last_sent_allocations[component_id] = target_power_changes[
+                component_id
+            ]
+
         failed_power = Power.zero()
-        for component_id, task in tasks.items():
-            try:
-                task.result()
-            except asyncio.CancelledError:
-                _logger.warning(
-                    "Timeout while setting power to EV charger %s", component_id
-                )
-            except ApiClientError as exc:
-                _logger.warning(
-                    "Got a client error while setting power to EV charger %s: %s",
-                    component_id,
-                    exc,
-                )
-            except Exception:  # pylint: disable=broad-except
-                _logger.exception(
-                    "Unknown error while setting power to EV charger: %s", component_id
-                )
-            else:
-                succeeded_components.add(component_id)
-                continue
-
-            failed_components.add(component_id)
+        for component_id in failed_components:
             failed_power += target_power_changes[component_id]
 
         allocated = self._evc_states.get_total_allocated_power()

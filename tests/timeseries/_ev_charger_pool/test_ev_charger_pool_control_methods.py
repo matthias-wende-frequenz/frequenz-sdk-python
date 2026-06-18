@@ -218,7 +218,7 @@ class TestEVChargerPoolControl:
             expected_allocations: Expected power allocations keyed by component ID.
         """
         actual_allocations = {
-            call.args[0]: call.args[1] for call in set_power.call_args_list
+            call.args[0]: call.args[2][0].upper for call in set_power.call_args_list
         }
         for component_id, expected_power in expected_allocations.items():
             assert actual_allocations[component_id] == expected_power
@@ -241,7 +241,7 @@ class TestEVChargerPoolControl:
 
         set_power = cast(
             AsyncMock,
-            microgrid.connection_manager.get().api_client.set_component_power_active,
+            microgrid.connection_manager.get().api_client.add_component_bounds,
         )
         await self._init_ev_chargers(mocks)
         ev_charger_pool = microgrid.new_ev_charger_pool(priority=5)
@@ -304,7 +304,7 @@ class TestEVChargerPoolControl:
         """
         set_power = cast(
             AsyncMock,
-            microgrid.connection_manager.get().api_client.set_component_power_active,
+            microgrid.connection_manager.get().api_client.add_component_bounds,
         )
         evc_a, evc_b = mocks.microgrid.evc_ids[:2]
         connected_ids = {evc_a, evc_b}
@@ -341,7 +341,7 @@ class TestEVChargerPoolControl:
         # (which is 0 since startup no longer blasts a zero write — see fix
         # #1). Treat "not called" as "allocated 0" for assertion purposes.
         called_allocations = {
-            call.args[0]: call.args[1] for call in set_power.call_args_list
+            call.args[0]: call.args[2][0].upper for call in set_power.call_args_list
         }
         actual_allocations = {
             evc_id: called_allocations.get(evc_id, 0.0) for evc_id in connected_ids
@@ -377,7 +377,7 @@ class TestEVChargerPoolControl:
         """Test redistribution stays unchanged when lower bounds are zero."""
         set_power = cast(
             AsyncMock,
-            microgrid.connection_manager.get().api_client.set_component_power_active,
+            microgrid.connection_manager.get().api_client.add_component_bounds,
         )
         evc_a, evc_b = mocks.microgrid.evc_ids[:2]
         connected_ids = {evc_a, evc_b}
@@ -414,7 +414,7 @@ class TestEVChargerPoolControl:
         """
         set_power = cast(
             AsyncMock,
-            microgrid.connection_manager.get().api_client.set_component_power_active,
+            microgrid.connection_manager.get().api_client.add_component_bounds,
         )
         evc_a, evc_b = mocks.microgrid.evc_ids[:2]
         connected_ids = {evc_a, evc_b}
@@ -443,7 +443,7 @@ class TestEVChargerPoolControl:
         # Missing entries mean "not written" — equivalent to 0 since the
         # manager no longer blasts a zero on startup (fix #1).
         called_allocations = {
-            call.args[0]: call.args[1] for call in set_power.call_args_list
+            call.args[0]: call.args[2][0].upper for call in set_power.call_args_list
         }
         actual_allocations = {
             evc_a: called_allocations.get(evc_a, 0.0),
