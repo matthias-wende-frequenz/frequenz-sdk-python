@@ -374,6 +374,66 @@ class TestEVChargerPoolControl:
                 for allocation in actual_allocations.values()
             )
 
+    async def test_echoed_operator_caps_do_not_limit_future_allocation(
+        self,
+        mocks: _Mocks,
+        mocker: MockerFixture,
+    ) -> None:
+        """Test echoed EV caps do not become the future physical ceiling."""
+        set_power = cast(
+            AsyncMock,
+            microgrid.connection_manager.get().api_client.add_component_bounds,
+        )
+        evc_a, evc_b = mocks.microgrid.evc_ids[:2]
+        connected_ids = {evc_a, evc_b}
+        await self._init_ev_chargers(mocks, connected_ids=connected_ids)
+        ev_charger_pool = microgrid.new_ev_charger_pool(priority=5)
+        await self._patch_ev_pool_status(mocks, mocker)
+        await self._patch_power_distributing_actor(mocker)
+
+        bounds_rx = ev_charger_pool.power_status.new_receiver()
+        await self._recv_reports_until(
+            bounds_rx,
+            lambda x: x.bounds is not None and x.bounds.upper.as_watts() == 22080.0,
+        )
+
+        set_power.reset_mock()
+        await ev_charger_pool.propose_power(Power.from_watts(10000.0))
+        await self._recv_reports_until(
+            bounds_rx,
+            lambda r: r.target_power == Power.from_watts(10000.0),
+        )
+        await asyncio.sleep(0.02)
+        self._assert_set_power_calls(set_power, {evc_a: 5000.0, evc_b: 5000.0})
+
+        now = datetime.now(tz=timezone.utc)
+        for evc_id in connected_ids:
+            mocks.streamer.update_stream(
+                EvChargerDataWrapper(
+                    evc_id,
+                    now,
+                    states={
+                        ComponentStateCode.READY,
+                        ComponentStateCode.EV_CHARGING_CABLE_PLUGGED_AT_EV,
+                        ComponentStateCode.EV_CHARGING_CABLE_PLUGGED_AT_STATION,
+                    },
+                    active_power=5000.0,
+                    active_power_inclusion_lower_bound=0.0,
+                    active_power_inclusion_upper_bound=5000.0,
+                    voltage_per_phase=(230.0, 230.0, 230.0),
+                )
+            )
+        await asyncio.sleep(0.15)
+
+        set_power.reset_mock()
+        await ev_charger_pool.propose_power(Power.from_watts(20000.0))
+        await self._recv_reports_until(
+            bounds_rx,
+            lambda r: r.target_power == Power.from_watts(20000.0),
+        )
+        await asyncio.sleep(0.02)
+        self._assert_set_power_calls(set_power, {evc_a: 10000.0, evc_b: 10000.0})
+
     async def test_zero_minimum_power_distribution_is_unchanged(
         self,
         mocks: _Mocks,

@@ -88,6 +88,15 @@ class EVChargerManager(ComponentManager):
         # The per-charger active-power caps (watts) most recently sent to the
         # API. Used to periodically re-assert the bounds before they expire.
         self._last_sent_allocations: dict[ComponentId, Power] = {}
+        # The maximum non-zero active-power inclusion upper bound seen for each
+        # charger. EV chargers are controlled by adding operator bounds
+        # ``[0, allocation]``. Nitrogen intersects those with device bounds and
+        # echoes the result back as the current inclusion bound, so using the
+        # latest inclusion upper bound directly would make the allocator read
+        # its own cap as the physical ceiling and ratchet to zero. Keep the
+        # pre-cap high-water mark and use it as the physical ceiling whenever a
+        # separate rated bound is unavailable.
+        self._max_seen_inclusion_upper: dict[ComponentId, float] = {}
 
     @override
     def component_ids(self) -> collections.abc.Set[ComponentId]:
@@ -125,12 +134,53 @@ class EVChargerManager(ComponentManager):
             )
         }
 
+    def _effective_upper_bound(self, evc: EvcState) -> float:
+        """Return the physical charging ceiling to use for allocation.
+
+        Args:
+            evc: The EV charger state whose current data should be inspected.
+
+        Returns:
+            A non-negative active-power upper bound in watts. Prefer the
+                non-echoed rated bound when available. Otherwise use the maximum
+                inclusion upper bound seen before operator caps were echoed back
+                by the API, falling back to the current inclusion upper bound
+                when no high-water mark exists yet.
+        """
+        rated_upper = evc.last_data.active_power_rated_upper_bound
+        if rated_upper is not None:
+            return max(0.0, rated_upper)
+
+        component_id = evc.component_id
+        current_upper = max(0.0, evc.last_data.active_power_inclusion_upper_bound)
+        return max(
+            current_upper,
+            self._max_seen_inclusion_upper.get(component_id, 0.0),
+        )
+
+    def _remember_inclusion_upper_bound(self, data: EVChargerData) -> None:
+        """Remember a per-charger inclusion upper-bound high-water mark.
+
+        Args:
+            data: The latest EV charger telemetry sample.
+
+        The latest inclusion upper bound can be our own operator cap echoed back
+        by the API, but the highest value seen is still the best available
+        estimate of the physical ceiling when rated bounds are unavailable.
+        """
+        current_upper = max(0.0, data.active_power_inclusion_upper_bound)
+        if current_upper <= 0.0:
+            return
+        previous_upper = self._max_seen_inclusion_upper.get(data.component_id, 0.0)
+        if current_upper > previous_upper:
+            self._max_seen_inclusion_upper[data.component_id] = current_upper
+
     def _redistribute_power(self) -> dict[ComponentId, Power]:
         """Distribute target power across connected EV chargers.
 
         Each connected charger either receives zero power or an allocation within
-        its inclusion bounds. Chargers that cannot be given at least their lower
-        inclusion bound are excluded from the allocation.
+        its physical/rated ceiling. Chargers that cannot be given at least their
+        lower inclusion bound are excluded from the allocation.
 
         Returns:
             Updated power allocations for chargers whose target allocation changed.
@@ -148,7 +198,7 @@ class EVChargerManager(ComponentManager):
 
         total_target = max(self._target_power, Power.zero()).as_watts()
         upper_bounds = {
-            evc.component_id: max(0.0, evc.last_data.active_power_inclusion_upper_bound)
+            evc.component_id: self._effective_upper_bound(evc)
             for evc in connected_states
         }
         lower_bounds = {
@@ -258,6 +308,7 @@ class EVChargerManager(ComponentManager):
 
             if selected_from(selected, ev_charger_data_rx):
                 evc_data = selected.message
+                self._remember_inclusion_upper_bound(evc_data)
                 if evc_data.component_id not in self._evc_states:
                     # First time we see this charger: record its state but do
                     # not push any setpoint. The microgrid API may reject a 0
