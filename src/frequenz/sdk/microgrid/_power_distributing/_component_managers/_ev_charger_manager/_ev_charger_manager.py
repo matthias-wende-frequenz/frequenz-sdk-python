@@ -23,6 +23,17 @@ from frequenz.client.microgrid.metrics import Bounds, Metric
 from frequenz.quantities import Power
 from typing_extensions import override
 
+from ....._internal._asyncio import run_forever
+from ....._internal._math import is_close_to_zero
+from .... import connection_manager
+from ...._old_component_data import EVChargerData, _is_unknown_rated_power_bound
+from ..._component_pool_status_tracker import ComponentPoolStatusTracker
+from ..._component_status import ComponentPoolStatus, EVChargerStatusTracker
+from ...request import Request
+from ...result import PartialFailure, Result, Success
+from .._component_manager import ComponentManager
+from ._states import EvcState, EvcStates
+
 _logger = logging.getLogger(__name__)
 
 # EV chargers are controlled by constraining their AC active-power inclusion
@@ -37,17 +48,6 @@ _logger = logging.getLogger(__name__)
 # well before they lapse.
 _BOUNDS_VALIDITY = Validity.ONE_MINUTE
 _BOUNDS_RENEWAL_INTERVAL = timedelta(seconds=_BOUNDS_VALIDITY.value / 2)
-
-from ....._internal._asyncio import run_forever
-from ....._internal._math import is_close_to_zero
-from .... import connection_manager
-from ...._old_component_data import EVChargerData
-from ..._component_pool_status_tracker import ComponentPoolStatusTracker
-from ..._component_status import ComponentPoolStatus, EVChargerStatusTracker
-from ...request import Request
-from ...result import PartialFailure, Result, Success
-from .._component_manager import ComponentManager
-from ._states import EvcState, EvcStates
 
 
 class EVChargerManager(ComponentManager):
@@ -143,20 +143,23 @@ class EVChargerManager(ComponentManager):
         Returns:
             A non-negative active-power upper bound in watts. Prefer the
                 non-echoed rated bound when available. Otherwise use the maximum
-                inclusion upper bound seen before operator caps were echoed back
-                by the API, falling back to the current inclusion upper bound
-                when no high-water mark exists yet.
+                usable inclusion upper bound seen before operator caps were
+                echoed back by the API. If the API only reports the unbounded
+                +/-99 GW sentinel, treat the charger as having unknown headroom
+                so the finite target can still be distributed and clipped by the
+                service/device.
         """
         rated_upper = evc.last_data.active_power_rated_upper_bound
         if rated_upper is not None:
             return max(0.0, rated_upper)
 
         component_id = evc.component_id
-        current_upper = max(0.0, evc.last_data.active_power_inclusion_upper_bound)
-        return max(
-            current_upper,
-            self._max_seen_inclusion_upper.get(component_id, 0.0),
-        )
+        remembered_upper = self._max_seen_inclusion_upper.get(component_id)
+        current_upper = evc.last_data.active_power_inclusion_upper_bound
+        if _is_unknown_rated_power_bound(current_upper):
+            return remembered_upper if remembered_upper is not None else float("inf")
+
+        return max(max(0.0, current_upper), remembered_upper or 0.0)
 
     def _remember_inclusion_upper_bound(self, data: EVChargerData) -> None:
         """Remember a per-charger inclusion upper-bound high-water mark.
@@ -168,6 +171,9 @@ class EVChargerManager(ComponentManager):
         by the API, but the highest value seen is still the best available
         estimate of the physical ceiling when rated bounds are unavailable.
         """
+        if _is_unknown_rated_power_bound(data.active_power_inclusion_upper_bound):
+            return
+
         current_upper = max(0.0, data.active_power_inclusion_upper_bound)
         if current_upper <= 0.0:
             return
@@ -287,7 +293,9 @@ class EVChargerManager(ComponentManager):
         )
         target_power_rx = self._target_power_channel.new_receiver()
         renewal_timer = Timer(_BOUNDS_RENEWAL_INTERVAL, SkipMissedAndDrift())
-        async for selected in select(ev_charger_data_rx, target_power_rx, renewal_timer):
+        async for selected in select(
+            ev_charger_data_rx, target_power_rx, renewal_timer
+        ):
             target_power_changes = {}
             is_target_power_event = False
 

@@ -63,6 +63,45 @@ async def test_system_bounds_tracker_aggregates_rated_bounds() -> None:
     assert bounds.rated_bounds.upper == Power.from_watts(33000.0)
 
 
+async def test_system_bounds_tracker_ignores_unknown_inclusion_sentinel() -> None:
+    """Unknown inclusion sentinels should not become pool capacity."""
+    bounds_channel: Broadcast[SystemBounds] = Broadcast(name="evc-bounds-sentinel")
+    status_channel: Broadcast[ComponentPoolStatus] = Broadcast(
+        name="evc-status-sentinel"
+    )
+    bounds_rx = bounds_channel.new_receiver()
+    tracker = EVCSystemBoundsTracker(
+        {1}, status_channel.new_receiver(), bounds_channel.new_sender()
+    )
+    now = datetime.now(tz=timezone.utc)
+    tracker._latest_component_data = {
+        1: EVChargerData(
+            component_id=1,
+            timestamp=now,
+            active_power_inclusion_lower_bound=0.0,
+            active_power_inclusion_upper_bound=99_990_020_378.66602,
+            active_power_exclusion_lower_bound=0.0,
+            active_power_exclusion_upper_bound=0.0,
+            active_power_rated_lower_bound=None,
+            active_power_rated_upper_bound=None,
+        )
+    }
+
+    await tracker._send_bounds()
+    bounds = await bounds_rx.receive()
+
+    assert bounds.inclusion_bounds is not None
+    assert bounds.inclusion_bounds.upper == Power.zero()
+
+    tracker._last_sent_bounds = None
+    tracker._max_seen_inclusion_upper[1] = 22_000.0
+    await tracker._send_bounds()
+    bounds = await bounds_rx.receive()
+
+    assert bounds.inclusion_bounds is not None
+    assert bounds.inclusion_bounds.upper == Power.from_watts(22_000.0)
+
+
 async def test_system_bounds_tracker_missing_rated_bounds_yield_none() -> None:
     """Missing rated bounds should make aggregate rated bounds unknown."""
     bounds_channel: Broadcast[SystemBounds] = Broadcast(name="evc-bounds-missing")

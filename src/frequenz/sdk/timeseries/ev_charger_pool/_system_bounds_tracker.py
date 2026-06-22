@@ -13,7 +13,10 @@ from frequenz.quantities import Power
 from ..._internal._asyncio import run_forever
 from ...actor import BackgroundService
 from ...microgrid import connection_manager
-from ...microgrid._old_component_data import EVChargerData
+from ...microgrid._old_component_data import (
+    EVChargerData,
+    _is_unknown_rated_power_bound,
+)
 from ...microgrid._power_distributing._component_status import ComponentPoolStatus
 from .._base_types import Bounds, SystemBounds
 
@@ -60,6 +63,27 @@ class EVCSystemBoundsTracker(BackgroundService):
         # that feedback loop from capping the power managing actor's
         # allocations.
         self._max_seen_inclusion_upper: dict[ComponentId, float] = {}
+
+    def _inclusion_upper_bound(
+        self, component_id: ComponentId, data: EVChargerData
+    ) -> float:
+        """Return a usable inclusion upper bound for a charger.
+
+        Args:
+            component_id: The component ID for the EV charger.
+            data: The latest telemetry sample for the EV charger.
+
+        Returns:
+            A non-negative upper bound in watts. The remembered high-water mark is
+                preferred to avoid feeding echoed operator caps back as physical
+                pool capacity. The +/-99 GW sentinel is treated as unknown instead
+                of as real capacity.
+        """
+        remembered_upper = self._max_seen_inclusion_upper.get(component_id)
+        current_upper = data.active_power_inclusion_upper_bound
+        if _is_unknown_rated_power_bound(current_upper):
+            return remembered_upper or 0.0
+        return max(max(0.0, current_upper), remembered_upper or 0.0)
 
     def _aggregate_rated_bounds(self) -> Bounds[Power] | None:
         """Aggregate rated power bounds for the latest working EV chargers.
@@ -113,9 +137,7 @@ class EVCSystemBoundsTracker(BackgroundService):
             ),
             upper=Power.from_watts(
                 sum(
-                    self._max_seen_inclusion_upper.get(
-                        cid, data.active_power_inclusion_upper_bound
-                    )
+                    self._inclusion_upper_bound(cid, data)
                     for cid, data in self._latest_component_data.items()
                 )
             ),
@@ -184,11 +206,14 @@ class EVCSystemBoundsTracker(BackgroundService):
                 self._latest_component_data[data.component_id] = data
                 # Keep the high-water mark so operator-bound feedback
                 # cannot shrink the system-bounds ceiling.
-                prev = self._max_seen_inclusion_upper.get(
-                    data.component_id, 0.0
-                )
-                self._max_seen_inclusion_upper[data.component_id] = max(
-                    prev, data.active_power_inclusion_upper_bound
-                )
+                if not _is_unknown_rated_power_bound(
+                    data.active_power_inclusion_upper_bound
+                ):
+                    prev = self._max_seen_inclusion_upper.get(
+                        data.component_id, 0.0
+                    )
+                    self._max_seen_inclusion_upper[data.component_id] = max(
+                        prev, max(0.0, data.active_power_inclusion_upper_bound)
+                    )
 
             await self._send_bounds()
