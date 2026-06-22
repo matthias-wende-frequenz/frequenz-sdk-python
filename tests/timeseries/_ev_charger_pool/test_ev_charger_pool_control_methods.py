@@ -135,11 +135,16 @@ class TestEVChargerPoolControl:
         upper_bounds = upper_bounds or {}
 
         for evc_id in mocks.microgrid.evc_ids:
-            states = {ComponentStateCode.READY}
             if evc_id in connected_ids:
-                states |= {
+                states = {
+                    ComponentStateCode.READY,
                     ComponentStateCode.EV_CHARGING_CABLE_PLUGGED_AT_EV,
                     ComponentStateCode.EV_CHARGING_CABLE_PLUGGED_AT_STATION,
+                }
+            else:
+                states = {
+                    ComponentStateCode.READY,
+                    ComponentStateCode.EV_CHARGING_CABLE_UNPLUGGED,
                 }
 
             mocks.streamer.start_streaming(

@@ -1409,32 +1409,37 @@ class EVChargerData(ComponentData):  # pylint: disable=too-many-instance-attribu
             A cable state at the EV side implies the cable is also connected at the
             station side, so either EV-side or station-side cable states are treated
             as evidence of a connected EV.
+
+            When the charger reports no cable state at all (neither connected
+            nor unplugged), the connection status is unknown.  In that case we
+            optimistically assume the charger is available so that deployments
+            where the device does not expose cable semantics (e.g. HIL
+            simulations, simple AC chargers) can still be controlled.
         """
         has_error = ComponentStateCode.ERROR in self.states
         is_authorized = (
             ComponentErrorCode.UNAUTHORIZED not in self.errors
             and ComponentErrorCode.UNAUTHORIZED not in self.warnings
         )
-        is_connected_at_ev = bool(
-            {
-                ComponentStateCode.EV_CHARGING_CABLE_LOCKED_AT_EV,
-                ComponentStateCode.EV_CHARGING_CABLE_PLUGGED_AT_EV,
-            }
-            & self.states
-        )
-        is_connected_at_station = bool(
-            {
-                ComponentStateCode.EV_CHARGING_CABLE_LOCKED_AT_STATION,
-                ComponentStateCode.EV_CHARGING_CABLE_PLUGGED_AT_STATION,
-            }
-            & self.states
-        )
 
-        return (
-            not has_error
-            and is_authorized
-            and (is_connected_at_ev or is_connected_at_station)
+        _ALL_CABLE_STATES = {
+            ComponentStateCode.EV_CHARGING_CABLE_LOCKED_AT_EV,
+            ComponentStateCode.EV_CHARGING_CABLE_PLUGGED_AT_EV,
+            ComponentStateCode.EV_CHARGING_CABLE_LOCKED_AT_STATION,
+            ComponentStateCode.EV_CHARGING_CABLE_PLUGGED_AT_STATION,
+            ComponentStateCode.EV_CHARGING_CABLE_UNPLUGGED,
+        }
+
+        reported_cable_states = _ALL_CABLE_STATES & self.states
+
+        if not reported_cable_states:
+            # No cable state reported — assume the charger is available.
+            return not has_error and is_authorized
+
+        is_connected = bool(
+            reported_cable_states - {ComponentStateCode.EV_CHARGING_CABLE_UNPLUGGED}
         )
+        return not has_error and is_authorized and is_connected
 
 
 def _sample_rated_bounds(sample: MetricSample) -> list[Bounds]:
