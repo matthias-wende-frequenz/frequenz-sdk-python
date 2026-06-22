@@ -50,6 +50,16 @@ class EVCSystemBoundsTracker(BackgroundService):
         self._latest_component_data: dict[ComponentId, EVChargerData] = {}
         self._last_sent_bounds: SystemBounds | None = None
         self._component_pool_status = ComponentPoolStatus(set(), set())
+        # Track the maximum-ever-seen inclusion upper bound per charger.
+        # EV chargers are controlled via operator inclusion bounds that
+        # nitrogen intersects with the device bounds and echoes back as the
+        # system inclusion bounds.  This means the upper bound the SDK
+        # *itself* wrote is reflected back, ratcheting the system-bounds
+        # ceiling down to the last allocation.  By remembering the
+        # pre-operator ceiling (the highest value we ever saw) we prevent
+        # that feedback loop from capping the power managing actor's
+        # allocations.
+        self._max_seen_inclusion_upper: dict[ComponentId, float] = {}
 
     def _aggregate_rated_bounds(self) -> Bounds[Power] | None:
         """Aggregate rated power bounds for the latest working EV chargers.
@@ -103,8 +113,10 @@ class EVCSystemBoundsTracker(BackgroundService):
             ),
             upper=Power.from_watts(
                 sum(
-                    data.active_power_inclusion_upper_bound
-                    for data in self._latest_component_data.values()
+                    self._max_seen_inclusion_upper.get(
+                        cid, data.active_power_inclusion_upper_bound
+                    )
+                    for cid, data in self._latest_component_data.items()
                 )
             ),
         )
@@ -170,5 +182,13 @@ class EVCSystemBoundsTracker(BackgroundService):
                 ):
                     continue
                 self._latest_component_data[data.component_id] = data
+                # Keep the high-water mark so operator-bound feedback
+                # cannot shrink the system-bounds ceiling.
+                prev = self._max_seen_inclusion_upper.get(
+                    data.component_id, 0.0
+                )
+                self._max_seen_inclusion_upper[data.component_id] = max(
+                    prev, data.active_power_inclusion_upper_bound
+                )
 
             await self._send_bounds()
