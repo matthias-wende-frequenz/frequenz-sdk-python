@@ -221,6 +221,14 @@ class SystemBounds:
     If present, they will be a subset of the inclusion bounds.
     """
 
+    rated_bounds: Bounds[Power] | None = None
+    """Total rated/physical power bounds for all components of a pool.
+
+    Unlike inclusion bounds, these come from component configuration / rated limits and
+    are not affected by runtime power caps or operator bounds.  They are `None` when
+    the rated limits are not available or are reported as an unknown sentinel.
+    """
+
     def __contains__(self, item: Power) -> bool:
         """
         Check if the value is within the range of the container.

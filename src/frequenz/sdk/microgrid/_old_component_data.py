@@ -44,6 +44,14 @@ PhaseTuple: TypeAlias = tuple[float, float, float]
 
 DATA_STREAM_BUFFER_SIZE: int = 50
 
+_UNKNOWN_RATED_POWER_BOUND_THRESHOLD_W = 99_000_000_000.0
+"""Threshold above which rated power bounds are treated as unknown.
+
+nitrogend and HiL setups can report a +/-99.99 GW sentinel when no usable rated
+configuration exists.  Values at or above 99 GW are therefore not physical EV charger
+ratings and are surfaced as unknown.
+"""
+
 
 class TransitionalMetric(Enum):
     """An enum representing the metrics we had in v0.15 but are not a metric in v0.17."""
@@ -1197,6 +1205,28 @@ class EVChargerData(ComponentData):  # pylint: disable=too-many-instance-attribu
     details.
     """
 
+    active_power_rated_lower_bound: float | None = None
+    """Rated lower bound for EV charger active power in watts.
+
+    This is the physical/configured lower limit reported by the API for the charger,
+    represented in the passive sign convention (positive means consumption from the
+    grid, negative means supply into the grid).  It is not affected by runtime operator
+    bounds written via `add_component_bounds()`.
+
+    `None` means the rated lower bound is absent or reported as an unknown sentinel.
+    """
+
+    active_power_rated_upper_bound: float | None = None
+    """Rated upper bound for EV charger active power in watts.
+
+    This is the physical/configured upper charging limit reported by the API for the
+    charger, represented in the passive sign convention (positive means consumption
+    from the grid).  It is not affected by runtime operator bounds written via
+    `add_component_bounds()`.
+
+    `None` means the rated upper bound is absent or reported as an unknown sentinel.
+    """
+
     frequency: float = 0.0
     """AC frequency, in Hertz (Hz)."""
 
@@ -1251,6 +1281,12 @@ class EVChargerData(ComponentData):  # pylint: disable=too-many-instance-attribu
                         self.active_power_exclusion_upper_bound,
                     ) = _bound_ranges_to_inclusion_exclusion(
                         sample.bounds, "AC_ACTIVE_POWER", sample
+                    )
+                    (
+                        self.active_power_rated_lower_bound,
+                        self.active_power_rated_upper_bound,
+                    ) = _rated_bound_ranges_to_lower_upper(
+                        _sample_rated_bounds(sample), "AC_ACTIVE_POWER", sample
                     )
                 case Metric.AC_ACTIVE_POWER_PHASE_1:
                     active_power_per_phase[0] = value
@@ -1399,6 +1435,62 @@ class EVChargerData(ComponentData):  # pylint: disable=too-many-instance-attribu
             and is_authorized
             and (is_connected_at_ev or is_connected_at_station)
         )
+
+
+def _sample_rated_bounds(sample: MetricSample) -> list[Bounds]:
+    """Return rated/configuration bounds from a metric sample, if available.
+
+    The current microgrid client versions only expose runtime/system bounds as
+    `sample.bounds`.  Newer API/client versions expose the non-echoed physical limits
+    separately.  Support the known field names to keep this parser compatible across
+    the transition.
+    """
+    for field_name in ("rated_bounds", "metric_config_bounds", "config_bounds"):
+        bounds = getattr(sample, field_name, None)
+        if bounds is not None:
+            return list(bounds)
+    return []
+
+
+def _is_unknown_rated_power_bound(value: float | None) -> bool:
+    """Return whether a rated power bound value means unknown/unavailable."""
+    return (
+        value is None
+        or math.isnan(value)
+        or abs(value) >= _UNKNOWN_RATED_POWER_BOUND_THRESHOLD_W
+    )
+
+
+def _rated_bound_ranges_to_lower_upper(
+    bounds: list[Bounds], name: str, sample: MetricSample
+) -> tuple[float | None, float | None]:
+    """Convert rated/configuration bounds to lower and upper limits.
+
+    Rated bounds should be a single physical/configured range.  If the upper bound is
+    absent or contains the +/-99.99 GW sentinel, the rated power is unknown and both
+    values are returned as `None`.
+    """
+    match bounds:
+        case []:
+            return (None, None)
+        case [rated_bound, *extra_bounds]:
+            if extra_bounds:
+                _logger.warning(
+                    "Too many rated bounds found in sample, only one is supported for "
+                    "%s, using only the first one: %r",
+                    name,
+                    sample,
+                )
+            if _is_unknown_rated_power_bound(rated_bound.upper):
+                return (None, None)
+            lower = (
+                None
+                if _is_unknown_rated_power_bound(rated_bound.lower)
+                else rated_bound.lower
+            )
+            return (lower, rated_bound.upper)
+        case unexpected:
+            assert_never(unexpected)
 
 
 def _bound_ranges_to_inclusion_exclusion(

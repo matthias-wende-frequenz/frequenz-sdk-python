@@ -179,6 +179,8 @@ class EvChargerDataWrapper(EVChargerData):
         active_power_exclusion_lower_bound: float = math.nan,
         active_power_inclusion_upper_bound: float = math.nan,
         active_power_exclusion_upper_bound: float = math.nan,
+        active_power_rated_lower_bound: float | None = None,
+        active_power_rated_upper_bound: float | None = None,
         reactive_power: float = math.nan,
         reactive_power_per_phase: tuple[float, float, float] = (
             math.nan,
@@ -206,6 +208,8 @@ class EvChargerDataWrapper(EVChargerData):
             active_power_exclusion_lower_bound=active_power_exclusion_lower_bound,
             active_power_inclusion_upper_bound=active_power_inclusion_upper_bound,
             active_power_exclusion_upper_bound=active_power_exclusion_upper_bound,
+            active_power_rated_lower_bound=active_power_rated_lower_bound,
+            active_power_rated_upper_bound=active_power_rated_upper_bound,
             reactive_power=reactive_power,
             reactive_power_per_phase=reactive_power_per_phase,
             frequency=frequency,

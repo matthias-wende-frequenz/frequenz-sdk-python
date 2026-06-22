@@ -51,6 +51,32 @@ class EVCSystemBoundsTracker(BackgroundService):
         self._last_sent_bounds: SystemBounds | None = None
         self._component_pool_status = ComponentPoolStatus(set(), set())
 
+    def _aggregate_rated_bounds(self) -> Bounds[Power] | None:
+        """Aggregate rated power bounds for the latest working EV chargers.
+
+        The rated upper bound represents the physical maximum charging power of the
+        pool, so it is the sum of all per-charger rated upper bounds.  If any charger
+        does not provide a usable rated upper bound, the aggregate is unknown.
+        """
+        if not self._latest_component_data:
+            return None
+
+        upper_bound_sum = 0.0
+        lower_bounds: list[float] = []
+        for data in self._latest_component_data.values():
+            upper_bound = data.active_power_rated_upper_bound
+            if upper_bound is None:
+                return None
+            upper_bound_sum += upper_bound
+
+            lower_bound = data.active_power_rated_lower_bound
+            lower_bounds.append(0.0 if lower_bound is None else lower_bound)
+
+        return Bounds(
+            lower=Power.from_watts(min(lower_bounds)),
+            upper=Power.from_watts(upper_bound_sum),
+        )
+
     def start(self) -> None:
         """Start the EV charger system bounds tracker."""
         self._tasks.add(asyncio.create_task(run_forever(self._run)))
@@ -97,10 +123,13 @@ class EVCSystemBoundsTracker(BackgroundService):
             ),
         )
 
+        rated_bounds = self._aggregate_rated_bounds()
+
         if (
             self._last_sent_bounds is None
             or inclusion_bounds != self._last_sent_bounds.inclusion_bounds
             or exclusion_bounds != self._last_sent_bounds.exclusion_bounds
+            or rated_bounds != self._last_sent_bounds.rated_bounds
         ):
             self._last_sent_bounds = SystemBounds(
                 timestamp=max(
@@ -108,6 +137,7 @@ class EVCSystemBoundsTracker(BackgroundService):
                 ),
                 inclusion_bounds=inclusion_bounds,
                 exclusion_bounds=exclusion_bounds,
+                rated_bounds=rated_bounds,
             )
             await self._bounds_sender.send(self._last_sent_bounds)
 
