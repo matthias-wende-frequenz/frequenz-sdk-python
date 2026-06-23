@@ -5,8 +5,10 @@
 
 import asyncio
 import collections.abc
+import dataclasses
 import logging
-from datetime import datetime, timedelta
+import math
+from datetime import datetime, timedelta, timezone
 
 from frequenz.channels import (
     Broadcast,
@@ -17,7 +19,7 @@ from frequenz.channels import (
 )
 from frequenz.channels.timer import SkipMissedAndDrift, Timer
 from frequenz.client.common.microgrid.components import ComponentId
-from frequenz.client.microgrid import ApiClientError, MicrogridApiClient, Validity
+from frequenz.client.microgrid import ApiClientError, MicrogridApiClient
 from frequenz.client.microgrid.component import EvCharger
 from frequenz.client.microgrid.metrics import Bounds, Metric
 from frequenz.quantities import Power
@@ -42,12 +44,54 @@ _logger = logging.getLogger(__name__)
 # to the asset, so a direct setpoint would be immediately overwritten by that
 # relay; an upper bound, on the other hand, is honoured.
 #
-# Bounds expire after ``_BOUNDS_VALIDITY``. Unlike an expiring setpoint (which
-# resets the asset to 0 W), an expiring upper bound *removes* the cap and lets
-# the charger draw full power, so the currently-desired caps must be re-asserted
-# well before they lapse.
-_BOUNDS_VALIDITY = Validity.ONE_MINUTE
-_BOUNDS_RENEWAL_INTERVAL = timedelta(seconds=_BOUNDS_VALIDITY.value / 2)
+# Bounds expire after the validity selected for each request. Unlike an expiring
+# setpoint (which resets the asset to 0 W), an expiring upper bound *removes* the
+# cap and lets the charger draw full power, so the currently-desired caps must be
+# re-asserted well before they lapse.
+#
+# The microgrid API accepts a whole-second bounds lifetime in the range
+# ``[1, 900]`` seconds, so request-specific validities are rounded up to whole
+# seconds and clamped to that range.
+_DEFAULT_BOUNDS_VALIDITY = timedelta(seconds=60)
+_MIN_BOUNDS_VALIDITY = timedelta(seconds=1)
+_MAX_BOUNDS_VALIDITY = timedelta(seconds=900)
+_BOUNDS_RENEWAL_CHECK_INTERVAL = timedelta(seconds=1.0)
+
+
+@dataclasses.dataclass
+class _LastSentAllocation:
+    """An EV charger allocation sent to the microgrid API."""
+
+    power: Power
+    """The most recently sent active-power cap."""
+
+    validity: timedelta
+    """The validity used when sending the cap."""
+
+    sent_at: datetime
+    """When the cap was sent successfully."""
+
+
+def _validity_for_request(request: Request) -> timedelta:
+    """Select the microgrid API bounds validity for a distributor request.
+
+    Args:
+        request: The power distribution request.
+
+    Returns:
+        The requested validity rounded up to whole seconds and clamped to the
+            API-supported ``[1, 900]`` second range, falling back to one minute
+            when no request-specific validity is provided.
+    """
+    requested_validity = request.bounds_validity
+    if requested_validity is None:
+        return _DEFAULT_BOUNDS_VALIDITY
+
+    seconds = math.ceil(requested_validity.total_seconds())
+    return max(
+        _MIN_BOUNDS_VALIDITY,
+        min(_MAX_BOUNDS_VALIDITY, timedelta(seconds=seconds)),
+    )
 
 
 class EVChargerManager(ComponentManager):
@@ -87,7 +131,7 @@ class EVChargerManager(ComponentManager):
         self._latest_request: Request = Request(Power.zero(), set())
         # The per-charger active-power caps (watts) most recently sent to the
         # API. Used to periodically re-assert the bounds before they expire.
-        self._last_sent_allocations: dict[ComponentId, Power] = {}
+        self._last_sent_allocations: dict[ComponentId, _LastSentAllocation] = {}
         # The maximum non-zero active-power inclusion upper bound seen for each
         # charger. EV chargers are controlled by adding operator bounds
         # ``[0, allocation]``. Nitrogen intersects those with device bounds and
@@ -159,7 +203,7 @@ class EVChargerManager(ComponentManager):
         if _is_unknown_rated_power_bound(current_upper):
             return remembered_upper if remembered_upper is not None else float("inf")
 
-        return max(max(0.0, current_upper), remembered_upper or 0.0)
+        return max(0.0, current_upper, remembered_upper or 0.0)
 
     def _remember_inclusion_upper_bound(self, data: EVChargerData) -> None:
         """Remember a per-charger inclusion upper-bound high-water mark.
@@ -181,7 +225,9 @@ class EVChargerManager(ComponentManager):
         if current_upper > previous_upper:
             self._max_seen_inclusion_upper[data.component_id] = current_upper
 
-    def _redistribute_power(self) -> dict[ComponentId, Power]:
+    def _redistribute_power(  # pylint: disable=too-many-locals
+        self,
+    ) -> dict[ComponentId, Power]:
         """Distribute target power across connected EV chargers.
 
         Each connected charger either receives zero power or an allocation within
@@ -285,14 +331,15 @@ class EVChargerManager(ComponentManager):
         threshold = max(abs(previous_upper), abs(current_upper)) * 0.05
         return delta > max(100.0, threshold)
 
-    async def _run(self) -> None:  # pylint: disable=too-many-locals
+    # pylint: disable-next=too-many-branches,too-many-locals,too-many-statements
+    async def _run(self) -> None:
         """Run the main event loop of the EV charger manager."""
         api = connection_manager.get().api_client
         ev_charger_data_rx = merge(
             *(EVChargerData.subscribe(api, evc_id) for evc_id in self._ev_charger_ids)
         )
         target_power_rx = self._target_power_channel.new_receiver()
-        renewal_timer = Timer(_BOUNDS_RENEWAL_INTERVAL, SkipMissedAndDrift())
+        renewal_timer = Timer(_BOUNDS_RENEWAL_CHECK_INTERVAL, SkipMissedAndDrift())
         async for selected in select(
             ev_charger_data_rx, target_power_rx, renewal_timer
         ):
@@ -303,15 +350,7 @@ class EVChargerManager(ComponentManager):
                 # Re-assert the currently-desired caps so the bounds do not
                 # lapse (which would uncap the chargers). This is not a response
                 # to a `distribute_power()` call, so no Result is emitted.
-                if self._last_sent_allocations:
-                    _logger.debug(
-                        "Renewing EV charger bounds: %s", self._last_sent_allocations
-                    )
-                    await self._send_api_bounds(
-                        api,
-                        dict(self._last_sent_allocations),
-                        self._api_power_request_timeout,
-                    )
+                await self._renew_api_bounds(api, self._api_power_request_timeout)
                 continue
 
             if selected_from(selected, ev_charger_data_rx):
@@ -365,11 +404,26 @@ class EVChargerManager(ComponentManager):
                 self._target_power = selected.message.power
                 _logger.debug("New target power: %s", self._target_power)
                 target_power_changes = self._redistribute_power()
+                request_validity = _validity_for_request(self._latest_request)
+                for component_id, last_sent in self._last_sent_allocations.items():
+                    desired_power = target_power_changes.get(component_id)
+                    if desired_power is None:
+                        desired_power = (
+                            self._evc_states.get(component_id).last_allocation
+                            if component_id in self._evc_states
+                            else Power.zero()
+                        )
+                    if (
+                        last_sent.validity != request_validity
+                        or last_sent.power != desired_power
+                    ):
+                        target_power_changes[component_id] = desired_power
 
             if target_power_changes:
                 _logger.debug("Setting power to EV chargers: %s", target_power_changes)
                 for component_id, power in target_power_changes.items():
-                    self._evc_states.get(component_id).update_last_allocation(power)
+                    if component_id in self._evc_states:
+                        self._evc_states.get(component_id).update_last_allocation(power)
                 result = await self._set_api_power(
                     api, target_power_changes, self._api_power_request_timeout
                 )
@@ -400,6 +454,7 @@ class EVChargerManager(ComponentManager):
         api: MicrogridApiClient,
         allocations: dict[ComponentId, Power],
         api_request_timeout: timedelta,
+        validity: timedelta,
     ) -> tuple[set[ComponentId], set[ComponentId]]:
         """Send EV charger active-power upper bounds to the microgrid API.
 
@@ -412,6 +467,7 @@ class EVChargerManager(ComponentManager):
             api: The microgrid API client to use for setting the bounds.
             allocations: Desired per-charger active-power caps (watts, ``>= 0``).
             api_request_timeout: The timeout for the API request.
+            validity: The validity duration for the temporary bounds.
 
         Returns:
             A tuple ``(succeeded_components, failed_components)`` of the
@@ -425,7 +481,7 @@ class EVChargerManager(ComponentManager):
                     component_id,
                     Metric.AC_POWER_ACTIVE,
                     [Bounds(lower=0.0, upper=max(0.0, power.as_watts()))],
-                    validity=_BOUNDS_VALIDITY,
+                    validity=validity,
                 )
             )
         _, pending = await asyncio.wait(
@@ -465,6 +521,43 @@ class EVChargerManager(ComponentManager):
 
         return succeeded_components, failed_components
 
+    def _record_sent_allocations(
+        self,
+        allocations: dict[ComponentId, Power],
+        succeeded_components: set[ComponentId],
+        validity: timedelta,
+    ) -> None:
+        """Record successfully sent allocations for future renewal."""
+        sent_at = datetime.now(tz=timezone.utc)
+        for component_id in succeeded_components:
+            self._last_sent_allocations[component_id] = _LastSentAllocation(
+                power=allocations[component_id], validity=validity, sent_at=sent_at
+            )
+
+    async def _renew_api_bounds(
+        self, api: MicrogridApiClient, api_request_timeout: timedelta
+    ) -> None:
+        """Renew EV charger bounds that are close to expiry."""
+        now = datetime.now(tz=timezone.utc)
+        due_by_validity: dict[timedelta, dict[ComponentId, Power]] = {}
+        for component_id, allocation in self._last_sent_allocations.items():
+            renewal_interval = allocation.validity / 2
+            if now - allocation.sent_at >= renewal_interval:
+                due_by_validity.setdefault(allocation.validity, {})[component_id] = (
+                    allocation.power
+                )
+
+        for validity, allocations in due_by_validity.items():
+            _logger.debug(
+                "Renewing EV charger bounds with validity %s: %s",
+                validity,
+                allocations,
+            )
+            succeeded_components, _ = await self._send_api_bounds(
+                api, allocations, api_request_timeout, validity
+            )
+            self._record_sent_allocations(allocations, succeeded_components, validity)
+
     async def _set_api_power(
         self,
         api: MicrogridApiClient,
@@ -483,16 +576,16 @@ class EVChargerManager(ComponentManager):
             Power distribution result, corresponding to the result of the API
                 request.
         """
+        validity = _validity_for_request(self._latest_request)
         succeeded_components, failed_components = await self._send_api_bounds(
-            api, target_power_changes, api_request_timeout
+            api, target_power_changes, api_request_timeout, validity
         )
 
         # Remember the caps that were applied so they can be re-asserted before
-        # the bounds expire (see ``_BOUNDS_RENEWAL_INTERVAL``).
-        for component_id in succeeded_components:
-            self._last_sent_allocations[component_id] = target_power_changes[
-                component_id
-            ]
+        # their request-specific validity expires.
+        self._record_sent_allocations(
+            target_power_changes, succeeded_components, validity
+        )
 
         failed_power = Power.zero()
         for component_id in failed_components:

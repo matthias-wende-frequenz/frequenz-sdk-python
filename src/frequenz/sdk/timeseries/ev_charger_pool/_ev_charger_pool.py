@@ -56,7 +56,13 @@ class EVChargerPool(ComponentPool[EVChargerPoolReferenceStore, EVChargerPoolRepo
             bounds: The power bounds for the proposal. When specified, these bounds will
                 limit the bounds for lower priority actors.
             max_proposal_age: The maximum age for this proposal. If `None`, the pool's
-                configured maximum proposal age is used.
+                configured maximum proposal age is used. When EV charger proposals
+                expire, the power manager recalculates the target immediately. If no
+                proposal remains, EV chargers are reset to the safe default target of
+                0 W. The external operator bounds used to control EV chargers are also
+                sent with a validity aligned with the active proposal lifetime, rounded
+                up to whole seconds and clamped to the microgrid API's supported range
+                of 1 to 900 seconds.
 
         Raises:
             EVChargerPoolError: If a discharge power for EV chargers is requested.
