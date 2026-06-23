@@ -14,4 +14,6 @@
 
 ## Bug Fixes
 
+* Expiring power-manager proposals now trigger an immediate target recalculation and distribution request. When the last EV charger proposal expires, the SDK sends the default 0 W target instead of leaving the last non-zero cap active in the distributor/API.
+* EV charger operator bounds now use a request-aware validity derived from the active proposal lifetime, sent to the microgrid API as a whole-second `timedelta` clamped to the supported 1 to 900 second range (down to a 1 s floor). The EV charger manager renews the currently valid allocation, including zero resets, and no longer renews stale non-zero caps after a reset.
 * Clearing the last EV charger proposal no longer makes the pool jump to the maximum system power; it now releases the chargers to 0 W, matching the documented "release control" semantics of `propose_power(None)`.
