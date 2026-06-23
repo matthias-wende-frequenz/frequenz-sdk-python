@@ -270,11 +270,29 @@ class BaseAlgorithm(abc.ABC):
         """
 
     @abc.abstractmethod
-    def drop_old_proposals(self, loop_time: float) -> None:
-        """Drop old proposals.
+    def drop_old_proposals(self, loop_time: float) -> set[frozenset[ComponentId]]:
+        """Drop old proposals and return buckets whose proposal set changed.
 
         This method is called periodically by the power manager.
 
         Args:
             loop_time: The current loop time.
+
+        Returns:
+            Component buckets from which at least one proposal was removed.
+        """
+
+    @abc.abstractmethod
+    def next_proposal_expiry(
+        self, component_ids: frozenset[ComponentId], loop_time: float
+    ) -> float | None:
+        """Return seconds until the next proposal in a bucket expires.
+
+        Args:
+            component_ids: The component IDs identifying the bucket.
+            loop_time: The current loop time.
+
+        Returns:
+            Seconds until the next active proposal in the bucket expires, or `None`
+                if the bucket has no active proposals.
         """

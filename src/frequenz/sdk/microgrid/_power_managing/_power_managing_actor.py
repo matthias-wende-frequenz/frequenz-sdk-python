@@ -35,6 +35,9 @@ from ._shifting_matryoshka import ShiftingMatryoshka
 
 _logger = logging.getLogger(__name__)
 
+_BOUNDS_VALIDITY_GRACE = timedelta(seconds=1.0)
+_RESET_BOUNDS_VALIDITY = timedelta(seconds=1.0)
+
 
 class PowerManagingActor(Actor):
     """The power manager."""
@@ -178,11 +181,30 @@ class PowerManagingActor(Actor):
             run_forever(lambda: self._bounds_tracker(component_ids, bounds_receiver))
         )
 
+    def _bounds_validity_for_request(
+        self, component_ids: frozenset[ComponentId], loop_time: float
+    ) -> timedelta | None:
+        """Return external bounds validity for the current component bucket.
+
+        Args:
+            component_ids: The component IDs identifying the bucket.
+            loop_time: The current loop time.
+
+        Returns:
+            A validity duration derived from the next active proposal expiry, or a
+                short reset validity when no active proposals remain.
+        """
+        next_expiry = self._algorithm.next_proposal_expiry(component_ids, loop_time)
+        if next_expiry is None:
+            return _RESET_BOUNDS_VALIDITY
+        return timedelta(seconds=next_expiry) + _BOUNDS_VALIDITY_GRACE
+
     async def _send_updated_target_power(
         self,
         component_ids: frozenset[ComponentId],
         proposal: Proposal | None,
     ) -> None:
+        loop_time = asyncio.get_event_loop().time()
         target_power = self._algorithm.calculate_target_power(
             component_ids,
             proposal,
@@ -194,11 +216,14 @@ class PowerManagingActor(Actor):
                     power=target_power,
                     component_ids=component_ids,
                     adjust_power=True,
+                    bounds_validity=self._bounds_validity_for_request(
+                        component_ids, loop_time
+                    ),
                 )
             )
 
     @override
-    async def _run(self) -> None:
+    async def _run(self) -> None:  # pylint: disable=too-many-branches
         """Run the power managing actor."""
         last_result_partial_failure = False
         drop_old_proposals_timer = Timer(timedelta(seconds=1.0), SkipMissedAndDrift())
@@ -264,4 +289,10 @@ class PowerManagingActor(Actor):
                 await self._send_reports(frozenset(result.request.component_ids))
 
             elif selected_from(selected, drop_old_proposals_timer):
-                self._algorithm.drop_old_proposals(asyncio.get_event_loop().time())
+                changed_component_ids = self._algorithm.drop_old_proposals(
+                    asyncio.get_event_loop().time()
+                )
+                for component_ids in changed_component_ids:
+                    if component_ids in self._system_bounds:
+                        await self._send_updated_target_power(component_ids, None)
+                        await self._send_reports(component_ids)

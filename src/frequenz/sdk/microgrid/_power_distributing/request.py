@@ -4,6 +4,7 @@
 
 import dataclasses
 from collections import abc
+from datetime import timedelta
 
 from frequenz.client.common.microgrid.components import ComponentId
 from frequenz.quantities import Power
@@ -27,4 +28,13 @@ class Request:
 
     If `False` and the power is outside the available bounds, the request will
     fail and be replied to with an `OutOfBound` result.
+    """
+
+    bounds_validity: timedelta | None = None
+    """Maximum validity for external operator bounds produced for this request.
+
+    Component managers that control assets through temporary operator bounds can
+    use this value to keep those external bounds aligned with the lifetime of the
+    proposals currently determining this target power. Component managers that do
+    not write such bounds can ignore it.
     """

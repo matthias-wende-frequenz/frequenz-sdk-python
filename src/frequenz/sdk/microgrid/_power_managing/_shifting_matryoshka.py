@@ -365,7 +365,7 @@ class ShiftingMatryoshka(BaseAlgorithm):
         )
 
     @override
-    def drop_old_proposals(self, loop_time: float) -> None:
+    def drop_old_proposals(self, loop_time: float) -> set[frozenset[ComponentId]]:
         """Drop old proposals.
 
         This will remove all proposals that have not been updated for longer than
@@ -373,7 +373,11 @@ class ShiftingMatryoshka(BaseAlgorithm):
 
         Args:
             loop_time: The current loop time.
+
+        Returns:
+            Component buckets from which at least one proposal was removed.
         """
+        changed_buckets: set[frozenset[ComponentId]] = set()
         buckets_to_delete: list[frozenset[ComponentId]] = []
         for component_ids, proposals in self._component_buckets.items():
             to_delete: list[Proposal] = []
@@ -387,9 +391,41 @@ class ShiftingMatryoshka(BaseAlgorithm):
                     to_delete.append(proposal)
             for proposal in to_delete:
                 proposals.remove(proposal)
+            if to_delete:
+                changed_buckets.add(component_ids)
             if not proposals:
                 buckets_to_delete.append(component_ids)
 
         for component_ids in buckets_to_delete:
             del self._component_buckets[component_ids]
-            _ = self._target_power.pop(component_ids, None)
+
+        return changed_buckets
+
+    @override
+    def next_proposal_expiry(
+        self, component_ids: frozenset[ComponentId], loop_time: float
+    ) -> float | None:
+        """Return seconds until the next proposal in a bucket expires.
+
+        Args:
+            component_ids: The component IDs identifying the bucket.
+            loop_time: The current loop time.
+
+        Returns:
+            Seconds until the next active proposal in the bucket expires, or `None`
+                if the bucket has no active proposals.
+        """
+        proposals = self._component_buckets.get(component_ids)
+        if not proposals:
+            return None
+
+        next_expiry = min(
+            proposal.creation_time
+            + (
+                proposal.max_age
+                if proposal.max_age is not None
+                else self._max_proposal_age_sec
+            )
+            for proposal in proposals
+        )
+        return max(0.0, next_expiry - loop_time)
