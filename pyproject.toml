@@ -102,6 +102,13 @@ Issues = "https://github.com/frequenz-floss/frequenz-sdk-python/issues"
 Repository = "https://github.com/frequenz-floss/frequenz-sdk-python"
 Support = "https://github.com/frequenz-floss/frequenz-sdk-python/discussions/categories/support"
 
+# TEMPORARY: point frequenz-client-microgrid at the patched fork branch that adds
+# `timedelta` validity to `add_component_bounds` (see the client repo sprint
+# `sprint_client_timedelta_bounds_validity.md`). Remove this override and bump the
+# dependency constraint once the change is released to PyPI.
+[tool.uv.sources]
+frequenz-client-microgrid = { git = "https://github.com/matthias-wende-frequenz/frequenz-client-microgrid-python.git", branch = "feat/timedelta-bounds-validity" }
+
 [tool.black]
 line-length = 88
 target-version = ['py311']

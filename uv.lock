@@ -416,8 +416,8 @@ wheels = [
 
 [[package]]
 name = "frequenz-client-microgrid"
-version = "0.18.3"
-source = { registry = "https://pypi.org/simple" }
+version = "0.18.3.post40+g5d5b0ff04"
+source = { git = "https://github.com/matthias-wende-frequenz/frequenz-client-microgrid-python.git?branch=feat%2Ftimedelta-bounds-validity#5d5b0ff04102ae27b2d16015278ec0d1f33dd3bc" }
 dependencies = [
     { name = "frequenz-api-common" },
     { name = "frequenz-api-microgrid" },
@@ -428,10 +428,6 @@ dependencies = [
     { name = "grpcio" },
     { name = "protobuf" },
     { name = "typing-extensions" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/af/bc/c1a2805f5c86c3e9cba3d74a4882b903c3cc83d5938604cebadffb2c33e9/frequenz_client_microgrid-0.18.3.tar.gz", hash = "sha256:7e97397cb66ab65e67108cdbfe12971625698c31db98095556621850077705b7", size = 44422, upload-time = "2026-05-06T12:46:39.899Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/fc/66/4c9bcb67939a11c156cba2484e93b4d3b35884b06566aae8dbf427c3c075/frequenz_client_microgrid-0.18.3-py3-none-any.whl", hash = "sha256:f30ff4f4d6c525f172e5956af12572176ed6ea9f076b672be81d1a43e4fdb8e7", size = 64673, upload-time = "2026-05-06T12:46:38.207Z" },
 ]
 
 [[package]]
@@ -676,7 +672,7 @@ requires-dist = [
     { name = "flake8-pyproject", marker = "extra == 'dev-flake8'", specifier = "==1.2.4" },
     { name = "frequenz-channels", specifier = ">=1.6.1,<2.0.0" },
     { name = "frequenz-client-common", specifier = ">=0.3.6,<0.4.0" },
-    { name = "frequenz-client-microgrid", specifier = ">=0.18.1,<0.19.0" },
+    { name = "frequenz-client-microgrid", git = "https://github.com/matthias-wende-frequenz/frequenz-client-microgrid-python.git?branch=feat%2Ftimedelta-bounds-validity" },
     { name = "frequenz-microgrid-component-graph", specifier = ">=0.4,<0.5" },
     { name = "frequenz-quantities", extras = ["marshmallow"], specifier = ">=1.0.0,<2.0.0" },
     { name = "frequenz-repo-config", extras = ["extra-lint-examples"], marker = "extra == 'dev-pytest'", specifier = "==0.17.0" },
