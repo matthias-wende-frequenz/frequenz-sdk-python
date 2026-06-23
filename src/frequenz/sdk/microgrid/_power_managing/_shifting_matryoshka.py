@@ -78,7 +78,8 @@ class ShiftingMatryoshka(BaseAlgorithm):
         Args:
             component_ids: The component IDs to calculate the target power for.
             system_bounds: The system bounds for the components in the proposal.
-            priority: The priority of the actor for which the target power is calculated.
+            priority: The priority of the actor for which the target power is
+                calculated.
 
         Returns:
             The new target power and bounds for the components.
@@ -177,7 +178,8 @@ class ShiftingMatryoshka(BaseAlgorithm):
                 # Shift the available bounds by the proposal power.
                 lower_bound = lower_bound - proposal_power
                 upper_bound = upper_bound - proposal_power
-                # Add the proposal power to the target power (aka shift in the opposite direction).
+                # Add the proposal power to the target power (aka shift in the
+                # opposite direction).
                 target_power += proposal_power
 
                 allocations[next_proposal.source_id] = str(proposal_power)
@@ -376,7 +378,12 @@ class ShiftingMatryoshka(BaseAlgorithm):
         for component_ids, proposals in self._component_buckets.items():
             to_delete: list[Proposal] = []
             for proposal in proposals:
-                if (loop_time - proposal.creation_time) > self._max_proposal_age_sec:
+                max_proposal_age_sec = (
+                    proposal.max_age
+                    if proposal.max_age is not None
+                    else self._max_proposal_age_sec
+                )
+                if (loop_time - proposal.creation_time) > max_proposal_age_sec:
                     to_delete.append(proposal)
             for proposal in to_delete:
                 proposals.remove(proposal)

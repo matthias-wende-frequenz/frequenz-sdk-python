@@ -7,11 +7,11 @@ import asyncio
 import uuid
 from abc import ABC, abstractmethod
 from collections import abc
+from datetime import timedelta
 from typing import Generic, TypeVar, cast
 
 from frequenz.client.common.microgrid.components import ComponentId
 from frequenz.quantities import Power
-
 from frequenz.sdk._internal._channels import MappingReceiverFetcher, ReceiverFetcher
 from frequenz.sdk.microgrid import _power_distributing, _power_managing
 from frequenz.sdk.timeseries import Bounds
@@ -34,6 +34,7 @@ class ComponentPool(ABC, Generic[RefStoreT, ReportT]):
         pool_ref_store: RefStoreT,
         name: str | None,
         priority: int,
+        max_proposal_age: timedelta | None = None,
     ) -> None:
         """Create an `AbstractPool` instance.
 
@@ -42,11 +43,14 @@ class ComponentPool(ABC, Generic[RefStoreT, ReportT]):
             name: An optional name used to identify this instance of the pool or a
                 corresponding actor in the logs.
             priority: The priority of the actor using this wrapper.
+            max_proposal_age: The default maximum age for proposals sent by this pool.
+                If `None`, the power manager algorithm's default is used.
         """
         self._pool_ref_store = pool_ref_store
         unique_id = str(uuid.uuid4())
         self._source_id = unique_id if name is None else f"{name}-{unique_id}"
         self._priority = priority
+        self._max_proposal_age = max_proposal_age
 
     @property
     def component_ids(self) -> abc.Set[ComponentId]:
@@ -61,6 +65,8 @@ class ComponentPool(ABC, Generic[RefStoreT, ReportT]):
         self,
         power: Power | None,
         bounds: Bounds[Power | None] = Bounds(None, None),
+        *,
+        max_proposal_age: timedelta | None = None,
     ) -> None:
         """Send a proposal to the power manager for the pool's underlying components.
 
@@ -78,7 +84,15 @@ class ComponentPool(ABC, Generic[RefStoreT, ReportT]):
                 is equivalent to not having a proposal or withdrawing a previous one.
             bounds: The power bounds for the proposal. When specified, these bounds will
                 limit the bounds for lower priority actors.
+            max_proposal_age: The maximum age for this proposal. If `None`, the pool's
+                configured maximum proposal age is used. If that is also `None`, the
+                power manager algorithm's default is used.
         """
+        effective_max_proposal_age = (
+            max_proposal_age
+            if max_proposal_age is not None
+            else self._max_proposal_age
+        )
         await self._pool_ref_store.power_manager_requests_sender.send(
             _power_managing.Proposal(
                 source_id=self._source_id,
@@ -87,6 +101,11 @@ class ComponentPool(ABC, Generic[RefStoreT, ReportT]):
                 component_ids=self._pool_ref_store.component_ids,
                 priority=self._priority,
                 creation_time=asyncio.get_running_loop().time(),
+                max_age=(
+                    effective_max_proposal_age.total_seconds()
+                    if effective_max_proposal_age is not None
+                    else None
+                ),
             )
         )
 
@@ -107,7 +126,8 @@ class ComponentPool(ABC, Generic[RefStoreT, ReportT]):
         These include
           - the current inclusion/exclusion bounds available for the pool's priority,
           - the current target power for the pool's set of components,
-          - the result of the last distribution request for the pool's set of components,.
+          - the result of the last distribution request for the pool's set of
+            components.
 
         Returns:
             A receiver that will stream power status reports for the pool's priority.

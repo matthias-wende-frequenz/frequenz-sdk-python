@@ -9,6 +9,7 @@ specify their individual priorities with each request.
 """
 
 import asyncio
+from datetime import timedelta
 
 from frequenz.quantities import Energy, Percentage, Power, Temperature
 from typing_extensions import override
@@ -45,11 +46,14 @@ class BatteryPool(ComponentPool[BatteryPoolReferenceStore, BatteryPoolReport]):
         [power_status][frequenz.sdk.timeseries.battery_pool.BatteryPool.power_status].
       - control methods for proposing power values, namely:
         [propose_power][frequenz.sdk.timeseries.battery_pool.BatteryPool.propose_power],
-        [propose_charge][frequenz.sdk.timeseries.battery_pool.BatteryPool.propose_charge] and
+        [propose_charge][frequenz.sdk.timeseries.battery_pool.BatteryPool.propose_charge]
+        and
         [propose_discharge][frequenz.sdk.timeseries.battery_pool.BatteryPool.propose_discharge].
     """
 
-    async def propose_charge(self, power: Power | None) -> None:
+    async def propose_charge(
+        self, power: Power | None, *, max_proposal_age: timedelta | None = None
+    ) -> None:
         """Set the given charge power for the batteries in the pool.
 
         Power values need to be positive values, indicating charge power.
@@ -67,12 +71,19 @@ class BatteryPool(ComponentPool[BatteryPoolReferenceStore, BatteryPoolReport]):
             power: The unsigned charge power to propose for the batteries in the pool.
                 If None, the proposed power of higher priority actors will take
                 precedence as the target power.
+            max_proposal_age: The maximum age for this proposal. If `None`, the pool's
+                configured maximum proposal age is used.
 
         Raises:
             ValueError: If the given power is negative.
         """
         if power and power < Power.zero():
             raise ValueError("Charge power must be positive.")
+        effective_max_proposal_age = (
+            max_proposal_age
+            if max_proposal_age is not None
+            else self._max_proposal_age
+        )
         await self._pool_ref_store.power_manager_requests_sender.send(
             _power_managing.Proposal(
                 source_id=self._source_id,
@@ -81,10 +92,17 @@ class BatteryPool(ComponentPool[BatteryPoolReferenceStore, BatteryPoolReport]):
                 component_ids=self._pool_ref_store.component_ids,
                 priority=self._priority,
                 creation_time=asyncio.get_running_loop().time(),
+                max_age=(
+                    effective_max_proposal_age.total_seconds()
+                    if effective_max_proposal_age is not None
+                    else None
+                ),
             )
         )
 
-    async def propose_discharge(self, power: Power | None) -> None:
+    async def propose_discharge(
+        self, power: Power | None, *, max_proposal_age: timedelta | None = None
+    ) -> None:
         """Set the given discharge power for the batteries in the pool.
 
         Power values need to be positive values, indicating discharge power.
@@ -102,6 +120,8 @@ class BatteryPool(ComponentPool[BatteryPoolReferenceStore, BatteryPoolReport]):
             power: The unsigned discharge power to propose for the batteries in the
                 pool.  If None, the proposed power of higher priority actors will take
                 precedence as the target power.
+            max_proposal_age: The maximum age for this proposal. If `None`, the pool's
+                configured maximum proposal age is used.
 
         Raises:
             ValueError: If the given power is negative.
@@ -110,6 +130,11 @@ class BatteryPool(ComponentPool[BatteryPoolReferenceStore, BatteryPoolReport]):
             if power < Power.zero():
                 raise ValueError("Discharge power must be positive.")
             power = -power
+        effective_max_proposal_age = (
+            max_proposal_age
+            if max_proposal_age is not None
+            else self._max_proposal_age
+        )
         await self._pool_ref_store.power_manager_requests_sender.send(
             _power_managing.Proposal(
                 source_id=self._source_id,
@@ -118,6 +143,11 @@ class BatteryPool(ComponentPool[BatteryPoolReferenceStore, BatteryPoolReport]):
                 component_ids=self._pool_ref_store.component_ids,
                 priority=self._priority,
                 creation_time=asyncio.get_running_loop().time(),
+                max_age=(
+                    effective_max_proposal_age.total_seconds()
+                    if effective_max_proposal_age is not None
+                    else None
+                ),
             )
         )
 

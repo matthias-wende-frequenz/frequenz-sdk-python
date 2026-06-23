@@ -226,6 +226,7 @@ class _DataPipeline:  # pylint: disable=too-many-instance-attributes
         priority: int,
         component_ids: abc.Set[ComponentId] | None = None,
         name: str | None = None,
+        max_proposal_age: timedelta | None = None,
     ) -> EVChargerPool:
         """Return the corresponding EVChargerPool instance for the given ids.
 
@@ -238,6 +239,8 @@ class _DataPipeline:  # pylint: disable=too-many-instance-attributes
                 EVChargerPool.
             name: An optional name used to identify this instance of the pool or a
                 corresponding actor in the logs.
+            max_proposal_age: The default maximum age for proposals sent by this pool.
+                If `None`, the power manager algorithm's default is used.
 
         Returns:
             An EVChargerPool instance.
@@ -294,6 +297,7 @@ class _DataPipeline:  # pylint: disable=too-many-instance-attributes
             pool_ref_store=self._ev_charger_pool_reference_stores[ref_store_key],
             name=name,
             priority=priority,
+            max_proposal_age=max_proposal_age,
         )
 
     def new_pv_pool(
@@ -302,6 +306,7 @@ class _DataPipeline:  # pylint: disable=too-many-instance-attributes
         priority: int,
         component_ids: abc.Set[ComponentId] | None = None,
         name: str | None = None,
+        max_proposal_age: timedelta | None = None,
     ) -> PVPool:
         """Return a new `PVPool` instance for the given ids.
 
@@ -314,6 +319,8 @@ class _DataPipeline:  # pylint: disable=too-many-instance-attributes
                 `PVPool`.
             name: An optional name used to identify this instance of the pool or a
                 corresponding actor in the logs.
+            max_proposal_age: The default maximum age for proposals sent by this pool.
+                If `None`, the power manager algorithm's default is used.
 
         Returns:
             A `PVPool` instance.
@@ -367,6 +374,7 @@ class _DataPipeline:  # pylint: disable=too-many-instance-attributes
             pool_ref_store=self._pv_pool_reference_stores[ref_store_key],
             name=name,
             priority=priority,
+            max_proposal_age=max_proposal_age,
         )
 
     def new_battery_pool(
@@ -375,6 +383,7 @@ class _DataPipeline:  # pylint: disable=too-many-instance-attributes
         priority: int,
         component_ids: abc.Set[ComponentId] | None = None,
         name: str | None = None,
+        max_proposal_age: timedelta | None = None,
     ) -> BatteryPool:
         """Return a new `BatteryPool` instance for the given ids.
 
@@ -387,6 +396,8 @@ class _DataPipeline:  # pylint: disable=too-many-instance-attributes
                 `BatteryPool`.
             name: An optional name used to identify this instance of the pool or a
                 corresponding actor in the logs.
+            max_proposal_age: The default maximum age for proposals sent by this pool.
+                If `None`, the power manager algorithm's default is used.
 
         Returns:
             A `BatteryPool` instance.
@@ -445,6 +456,7 @@ class _DataPipeline:  # pylint: disable=too-many-instance-attributes
             pool_ref_store=self._battery_pool_reference_stores[ref_store_key],
             name=name,
             priority=priority,
+            max_proposal_age=max_proposal_age,
         )
 
     def _data_sourcing_request_sender(self) -> Sender[ComponentMetricRequest]:
@@ -558,12 +570,20 @@ def logical_meter() -> LogicalMeter:
 
 
 def consumer() -> Consumer:
-    """Return the [`Consumption`][frequenz.sdk.timeseries.consumer.Consumer] measuring point."""
+    """Return the `Consumption` measuring point.
+
+    Returns:
+        The [`Consumption`][frequenz.sdk.timeseries.consumer.Consumer] measuring point.
+    """
     return _get().consumer()
 
 
 def producer() -> Producer:
-    """Return the [`Production`][frequenz.sdk.timeseries.producer.Producer] measuring point."""
+    """Return the `Production` measuring point.
+
+    Returns:
+        The [`Production`][frequenz.sdk.timeseries.producer.Producer] measuring point.
+    """
     return _get().producer()
 
 
@@ -572,6 +592,7 @@ def new_ev_charger_pool(
     priority: int,
     component_ids: abc.Set[ComponentId] | None = None,
     name: str | None = None,
+    max_proposal_age: timedelta | None = None,
 ) -> EVChargerPool:
     """Return a new `EVChargerPool` instance for the given parameters.
 
@@ -597,12 +618,17 @@ def new_ev_charger_pool(
             component graph are used.
         name: An optional name used to identify this instance of the pool or a
             corresponding actor in the logs.
+        max_proposal_age: The default maximum age for proposals sent by this pool. If
+            `None`, the power manager algorithm's default is used.
 
     Returns:
         An `EVChargerPool` instance.
     """
     return _get().new_ev_charger_pool(
-        priority=priority, component_ids=component_ids, name=name
+        priority=priority,
+        component_ids=component_ids,
+        name=name,
+        max_proposal_age=max_proposal_age,
     )
 
 
@@ -611,6 +637,7 @@ def new_battery_pool(
     priority: int,
     component_ids: abc.Set[ComponentId] | None = None,
     name: str | None = None,
+    max_proposal_age: timedelta | None = None,
 ) -> BatteryPool:
     """Return a new `BatteryPool` instance for the given parameters.
 
@@ -636,12 +663,17 @@ def new_battery_pool(
             graph are used.
         name: An optional name used to identify this instance of the pool or a
             corresponding actor in the logs.
+        max_proposal_age: The default maximum age for proposals sent by this pool. If
+            `None`, the power manager algorithm's default is used.
 
     Returns:
         A `BatteryPool` instance.
     """
     return _get().new_battery_pool(
-        priority=priority, component_ids=component_ids, name=name
+        priority=priority,
+        component_ids=component_ids,
+        name=name,
+        max_proposal_age=max_proposal_age,
     )
 
 
@@ -650,6 +682,7 @@ def new_pv_pool(
     priority: int,
     component_ids: abc.Set[ComponentId] | None = None,
     name: str | None = None,
+    max_proposal_age: timedelta | None = None,
 ) -> PVPool:
     """Return a new `PVPool` instance for the given parameters.
 
@@ -675,11 +708,18 @@ def new_pv_pool(
             graph are used.
         name: An optional name used to identify this instance of the pool or a
             corresponding actor in the logs.
+        max_proposal_age: The default maximum age for proposals sent by this pool. If
+            `None`, the power manager algorithm's default is used.
 
     Returns:
         A `PVPool` instance.
     """
-    return _get().new_pv_pool(priority=priority, component_ids=component_ids, name=name)
+    return _get().new_pv_pool(
+        priority=priority,
+        component_ids=component_ids,
+        name=name,
+        max_proposal_age=max_proposal_age,
+    )
 
 
 def grid() -> Grid:

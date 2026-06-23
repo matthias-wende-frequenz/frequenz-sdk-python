@@ -155,6 +155,12 @@ class Proposal:
     This is used by the power manager to determine the age of the proposal.
     """
 
+    max_age: float | None = None
+    """The maximum age of the proposal in seconds.
+
+    If `None`, the power manager algorithm's default maximum proposal age is used.
+    """
+
     def __lt__(self, other: Proposal) -> bool:
         """Compare two proposals by their priority.
 

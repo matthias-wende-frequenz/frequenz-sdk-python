@@ -3,6 +3,8 @@
 
 """Interactions with pools of EV Chargers."""
 
+from datetime import timedelta
+
 from frequenz.quantities import Current, Power
 from typing_extensions import override
 
@@ -33,6 +35,8 @@ class EVChargerPool(ComponentPool[EVChargerPoolReferenceStore, EVChargerPoolRepo
         self,
         power: Power | None,
         bounds: Bounds[Power | None] = Bounds(None, None),
+        *,
+        max_proposal_age: timedelta | None = None,
     ) -> None:
         """Send a proposal to the power manager for the pool's set of EV chargers.
 
@@ -51,6 +55,8 @@ class EVChargerPool(ComponentPool[EVChargerPoolReferenceStore, EVChargerPoolRepo
                 is equivalent to not having a proposal or withdrawing a previous one.
             bounds: The power bounds for the proposal. When specified, these bounds will
                 limit the bounds for lower priority actors.
+            max_proposal_age: The maximum age for this proposal. If `None`, the pool's
+                configured maximum proposal age is used.
 
         Raises:
             EVChargerPoolError: If a discharge power for EV chargers is requested.
@@ -59,7 +65,9 @@ class EVChargerPool(ComponentPool[EVChargerPoolReferenceStore, EVChargerPoolRepo
             raise EVChargerPoolError(
                 "Discharging from EV chargers is currently not supported."
             )
-        await super().propose_power(power, bounds=bounds)
+        await super().propose_power(
+            power, bounds=bounds, max_proposal_age=max_proposal_age
+        )
 
     @property
     def current_per_phase(self) -> Formula3Phase[Current]:

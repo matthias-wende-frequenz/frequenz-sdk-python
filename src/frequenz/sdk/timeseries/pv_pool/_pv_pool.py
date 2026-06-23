@@ -3,10 +3,11 @@
 
 """Interactions with pools of PV inverters."""
 
-from frequenz.quantities import Power
-from typing_extensions import override
+from datetime import timedelta
 
+from frequenz.quantities import Power
 from frequenz.sdk.microgrid import connection_manager
+from typing_extensions import override
 
 from ...timeseries import Bounds
 from ..component_pool import ComponentPool
@@ -32,6 +33,8 @@ class PVPool(ComponentPool[PVPoolReferenceStore, PVPoolReport]):
         self,
         power: Power | None,
         bounds: Bounds[Power | None] = Bounds(None, None),
+        *,
+        max_proposal_age: timedelta | None = None,
     ) -> None:
         """Send a proposal to the power manager for the pool's set of PV inverters.
 
@@ -53,13 +56,17 @@ class PVPool(ComponentPool[PVPoolReferenceStore, PVPoolReport]):
                 is equivalent to not having a proposal or withdrawing a previous one.
             bounds: The power bounds for the proposal.  When specified, this will limit
                 the bounds for lower priority actors.
+            max_proposal_age: The maximum age for this proposal. If `None`, the pool's
+                configured maximum proposal age is used.
 
         Raises:
             PVPoolError: If a charge power for PV inverters is requested.
         """
         if power is not None and power > Power.zero():
             raise PVPoolError("Charge powers for PV inverters is not supported.")
-        await super().propose_power(power, bounds=bounds)
+        await super().propose_power(
+            power, bounds=bounds, max_proposal_age=max_proposal_age
+        )
 
     @property
     @override

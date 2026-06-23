@@ -346,7 +346,12 @@ class Matryoshka(BaseAlgorithm):
         for component_ids, proposals in self._component_buckets.items():
             to_delete: list[Proposal] = []
             for proposal in proposals:
-                if (loop_time - proposal.creation_time) > self._max_proposal_age_sec:
+                max_proposal_age_sec = (
+                    proposal.max_age
+                    if proposal.max_age is not None
+                    else self._max_proposal_age_sec
+                )
+                if (loop_time - proposal.creation_time) > max_proposal_age_sec:
                     to_delete.append(proposal)
             for proposal in to_delete:
                 proposals.remove(proposal)
